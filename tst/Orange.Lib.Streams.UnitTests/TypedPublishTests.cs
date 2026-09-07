@@ -58,6 +58,39 @@ public class TypedPublishTests
         publisher.Singles[0].Type.Should().Be("OrderPlaced");
     }
 
+    /// <summary>The buffered convenience defaults the type the same way the direct one does.</summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task EnqueueAsync_serialises_the_body_and_defaults_the_type_to_the_clr_name()
+    {
+        var publisher = new RecordingPublisher();
+
+        await publisher.EnqueueAsync(
+            "customer-1",
+            new TypedOrder(7, "seven"),
+            TypedPublishJson.Default.TypedOrder,
+            options: new PublishOptions(CorrelationId: "corr-1", Partition: 3));
+
+        var call = publisher.Enqueued.Should().ContainSingle().Subject;
+        call.PartitionKey.Should().Be("customer-1");
+        call.Type.Should().Be(typeof(TypedOrder).FullName);
+        call.Options.CorrelationId.Should().Be("corr-1");
+        call.Options.Partition.Should().Be(3);
+        Decode(call.Body).Should().Be(new TypedOrder(7, "seven"));
+    }
+
+    /// <summary>An explicit type string wins over the CLR name on the buffered path too.</summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task EnqueueAsync_uses_an_explicit_type_string_when_one_is_given()
+    {
+        var publisher = new RecordingPublisher();
+
+        await publisher.EnqueueAsync("k", new TypedOrder(1, "a"), TypedPublishJson.Default.TypedOrder, type: "OrderPlaced");
+
+        publisher.Enqueued[0].Type.Should().Be("OrderPlaced");
+    }
+
     /// <summary>Nothing to publish issues no command at all.</summary>
     [Fact]
     [Trait("TestType", "UnitTest")]
@@ -81,10 +114,14 @@ public class TypedPublishTests
         var nullPublisher = async () => await ((IStreamPublisher)null!).PublishAsync("k", new TypedOrder(1, "a"), TypedPublishJson.Default.TypedOrder);
         var nullInfo = async () => await publisher.PublishAsync("k", new TypedOrder(1, "a"), null!);
         var nullMessages = async () => await publisher.PublishBatchAsync<TypedOrder>("k", null!, TypedPublishJson.Default.TypedOrder);
+        var nullBufferedPublisher = async () => await ((IStreamBufferedPublisher)null!).EnqueueAsync("k", new TypedOrder(1, "a"), TypedPublishJson.Default.TypedOrder);
+        var nullBufferedInfo = async () => await publisher.EnqueueAsync("k", new TypedOrder(1, "a"), null!);
 
         await nullPublisher.Should().ThrowAsync<ArgumentNullException>();
         await nullInfo.Should().ThrowAsync<ArgumentNullException>();
         await nullMessages.Should().ThrowAsync<ArgumentNullException>();
+        await nullBufferedPublisher.Should().ThrowAsync<ArgumentNullException>();
+        await nullBufferedInfo.Should().ThrowAsync<ArgumentNullException>();
     }
 
     /// <summary>A batch keeps order, and every body is its own message rather than a shared prefix.</summary>
@@ -245,12 +282,13 @@ public class TypedPublishTests
     /// Records what it was published, copying every body inside the call — the interface says a body
     /// is only valid until the returned task completes, and these all alias a pooled buffer.
     /// </summary>
-    private sealed class RecordingPublisher : IStreamPublisher
+    private sealed class RecordingPublisher : IStreamBufferedPublisher
     {
         internal static readonly StreamId AssignedId = new(1_700_000_000_000, 3);
 
         private readonly List<SinglePublish> singles = [];
         private readonly List<BatchPublish> batches = [];
+        private readonly List<SinglePublish> enqueued = [];
 
         /// <summary>Runs inside a publish, before it returns — used for the reentrancy case.</summary>
         internal Func<Task>? BeforeReturn { get; set; }
@@ -258,6 +296,8 @@ public class TypedPublishTests
         internal IReadOnlyList<SinglePublish> Singles => this.singles;
 
         internal IReadOnlyList<BatchPublish> Batches => this.batches;
+
+        internal IReadOnlyList<SinglePublish> Enqueued => this.enqueued;
 
         public async ValueTask<StreamId> PublishAsync(
             string partitionKey,
@@ -304,6 +344,21 @@ public class TypedPublishTests
 
             this.batches.Add(new BatchPublish(partitionKey, copies, segments, type, options));
         }
+
+        public ValueTask EnqueueAsync(
+            string partitionKey,
+            ReadOnlyMemory<byte> body,
+            string type,
+            PublishOptions options = default,
+            CancellationToken ct = default)
+        {
+            // Mirrors the real contract: the body is copied before this call returns.
+            this.enqueued.Add(new SinglePublish(partitionKey, body.ToArray(), type, options));
+
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
     }
 }
 

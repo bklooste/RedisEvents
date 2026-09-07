@@ -153,6 +153,47 @@ public static class TypedPublishExtensions
     }
 
     /// <summary>
+    /// Serialises <paramref name="message"/> as UTF-8 JSON and enqueues it for the next batch flush.
+    /// </summary>
+    /// <typeparam name="T">The message type.</typeparam>
+    /// <param name="publisher">The buffered publisher.</param>
+    /// <param name="partitionKey">The routing key; empty round-robins.</param>
+    /// <param name="message">The message.</param>
+    /// <param name="typeInfo">Source-generated metadata for <typeparamref name="T"/>.</param>
+    /// <param name="type">The message type string; defaults to <c>typeof(T).FullName</c>.</param>
+    /// <param name="options">Correlation, headers and an optional explicit partition.</param>
+    /// <param name="ct">Cancellation, observed only while waiting for queue space.</param>
+    /// <returns>A task that completes once the message is in the buffer — not once it is in Redis.</returns>
+    public static ValueTask EnqueueAsync<T>(
+        this IStreamBufferedPublisher publisher,
+        string partitionKey,
+        T message,
+        JsonTypeInfo<T> typeInfo,
+        string? type = null,
+        PublishOptions options = default,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(publisher);
+        ArgumentNullException.ThrowIfNull(typeInfo);
+
+        var (buffer, writer) = Rent();
+        try
+        {
+            JsonSerializer.Serialize(writer, message, typeInfo);
+            writer.Flush();
+
+            // EnqueueAsync copies the body into its own buffer before this call returns (see its
+            // contract), so unlike the direct PublishAsync<T> above there is nothing to await here
+            // before this method's own buffer goes back to the pool.
+            return publisher.EnqueueAsync(partitionKey, buffer.WrittenMemory, type ?? TypeName<T>.Value, options, ct);
+        }
+        finally
+        {
+            Return(buffer, writer);
+        }
+    }
+
+    /// <summary>
     /// Takes the calling thread's writer pair, detaching it for the duration so a reentrant publish
     /// on the same thread gets a fresh one instead of corrupting this one's buffer.
     /// </summary>
