@@ -48,8 +48,10 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,9 +76,15 @@ jobs:
           dotnet pack src/Orange.Lib.Streams.Web/Orange.Lib.Streams.Web.csproj
           -c Release --no-restore -o nupkgs
 
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: bklooste
+
       - name: Push to NuGet.org
         run: >
           dotnet nuget push "nupkgs/*.nupkg"
-          --api-key ${{ secrets.NUGET_API_KEY }}
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
