@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  R-25 (headless split). Everything in Orange.Lib.Streams that needs ASP.NET Core or the
+	  health-check abstractions lives here, so a worker with no web host can reference
+	  Orange.Lib.Streams alone. See docs/plans/2026-09-06-orange-lib-streams/12-remediation.md.
+	  The regression guard for that is tst/Orange.Lib.Streams.HeadlessSmoke.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../Orange.Lib.Streams/Orange.Lib.Streams.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Orange.Lib.Streams.UnitTests" />
+		<InternalsVisibleTo Include="Orange.Lib.Streams.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+
+</Project>

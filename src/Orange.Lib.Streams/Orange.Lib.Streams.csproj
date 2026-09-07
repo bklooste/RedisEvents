@@ -1,0 +1,41 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="StackExchange.Redis" Version="2.10.1" />
+		<PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
+		<!--
+		  R-25: these three replace <FrameworkReference Include="Microsoft.AspNetCore.App" />, which
+		  used to supply them. Core needs hosting, logging and the source-generated configuration
+		  binder; it must NOT need ASP.NET Core, so that a headless worker can reference it alone.
+		  The ASP.NET surface (admin endpoints, health check) lives in Orange.Lib.Streams.Web, and
+		  tst/Orange.Lib.Streams.HeadlessSmoke is the regression guard that keeps it out of here.
+		-->
+		<PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.2" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.2" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Orange.Lib.Streams.Web" />
+		<InternalsVisibleTo Include="Orange.Lib.Streams.UnitTests" />
+		<InternalsVisibleTo Include="Orange.Lib.Streams.Tests" />
+		<!--
+		  R-23: the headless guard asserts the container built exactly one StreamConsumerHost, which
+		  is internal wiring after the public-surface trim. It is a test project, not a consumer.
+		-->
+		<InternalsVisibleTo Include="Orange.Lib.Streams.HeadlessSmoke" />
+	</ItemGroup>
+
+</Project>

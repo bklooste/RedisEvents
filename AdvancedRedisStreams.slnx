@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Orange.Lib.Streams/Orange.Lib.Streams.csproj" />
+    <Project Path="src/Orange.Lib.Streams.Web/Orange.Lib.Streams.Web.csproj" />
+  </Folder>
+  <Folder Name="/tst/">
+    <Project Path="tst/Orange.Lib.Streams.UnitTests/Orange.Lib.Streams.UnitTests.csproj" />
+    <Project Path="tst/Orange.Lib.Streams.Tests/Orange.Lib.Streams.Tests.csproj" />
+  </Folder>
+</Solution>
