@@ -15,7 +15,14 @@
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 		<IsAotCompatible>true</IsAotCompatible>
+		<Description>ASP.NET Core health checks and minimal-API admin endpoints for Orange.Lib.Streams, kept separate so a headless worker can reference the core library without pulling in ASP.NET Core.</Description>
+		<PackageTags>redis;redis-streams;messaging;aspnetcore;health-checks</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<ProjectReference Include="../Orange.Lib.Streams/Orange.Lib.Streams.csproj" />

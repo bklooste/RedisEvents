@@ -10,7 +10,14 @@
 		<EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 		<IsAotCompatible>true</IsAotCompatible>
+		<Description>Partitioned, ordered messaging over Redis Streams: per-key ordering, at-least-once delivery with an explicit error contract, outbox/exactly-once publish, and durable consumer positions.</Description>
+		<PackageTags>redis;redis-streams;messaging;event-driven;outbox</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<PackageReference Include="StackExchange.Redis" Version="2.10.1" />

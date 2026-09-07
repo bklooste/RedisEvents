@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore AdvancedRedisStreams.slnx
+
+      - name: Build
+        run: dotnet build AdvancedRedisStreams.slnx -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test AdvancedRedisStreams.slnx -c Release --no-build
+          --filter "TestType!=PerfTest"
+          --logger "trx"
+          --results-directory TestResults
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+          retention-days: 7
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore AdvancedRedisStreams.slnx
+
+      - name: Pack Orange.Lib.Streams
+        run: >
+          dotnet pack src/Orange.Lib.Streams/Orange.Lib.Streams.csproj
+          -c Release --no-restore -o nupkgs
+
+      - name: Pack Orange.Lib.Streams.Web
+        run: >
+          dotnet pack src/Orange.Lib.Streams.Web/Orange.Lib.Streams.Web.csproj
+          -c Release --no-restore -o nupkgs
+
+      - name: Push to NuGet.org
+        run: >
+          dotnet nuget push "nupkgs/*.nupkg"
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
