@@ -155,16 +155,12 @@ builder.AddStream<OrderHandler>("orders");
 ```
 
 ```csharp
-public sealed class OrderHandler : IBatchHandler
+public sealed class OrderHandler : IMessageHandler
 {
-    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    public ValueTask HandleAsync(in StreamMsg msg, CancellationToken ct)
     {
-        for (var i = 0; i < batch.Length; i++)
-        {
-            var order = JsonSerializer.Deserialize<Order>(batch.Span[i].Body.Span);
-            // ... handle it
-        }
-
+        var order = JsonSerializer.Deserialize<Order>(msg.Body.Span);
+        // ... handle it
         return ValueTask.CompletedTask;
     }
 }
@@ -177,6 +173,28 @@ builder.AddStreamPublisher("orders");
 
 // later, injected as IStreamPublisher
 await publisher.PublishAsync(orderId, body, type: "OrderPlaced", ct: ct);
+```
+
+### Batch handlers
+
+The same `builder.AddStream<T>("orders")` registration works with a handler that receives a whole
+batch at once instead of one message at a time — same partitioning, positions, and error handling
+underneath, just fewer round trips through the handler when per-message overhead adds up:
+
+```csharp
+public sealed class OrderBatchHandler : IBatchHandler
+{
+    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    {
+        for (var i = 0; i < batch.Length; i++)
+        {
+            var order = JsonSerializer.Deserialize<Order>(batch.Span[i].Body.Span);
+            // ... handle it
+        }
+
+        return ValueTask.CompletedTask;
+    }
+}
 ```
 
 Full configuration reference, the outbox, idempotency helpers, and every sharp edge worth knowing
