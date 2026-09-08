@@ -344,6 +344,56 @@ crash](#buffered-publishes-are-lost-on-a-crash) before choosing one.
 
 ---
 
+## Typed publish and consume
+
+The calls above take raw bytes and a `type` string you write out by hand (`"OrderPlaced"`). When a
+topic carries one CLR type, that is boilerplate: `PublishAsync<T>` / `PublishBatchAsync<T>` /
+`EnqueueAsync<T>` serialise `T` as JSON for you, and `type` defaults to `typeof(T).FullName` — pass
+it explicitly only when you need a type string that does not match the CLR name (a migration, or a
+name shared across languages).
+
+They take a source-generated `JsonTypeInfo<T>`, never a reflection-based `JsonSerializerOptions` —
+the same AOT-safety rule the rest of the library follows. Define the context once:
+
+```csharp
+[JsonSerializable(typeof(Order))]
+internal sealed partial class OrderJson : JsonSerializerContext;
+```
+
+Publishing:
+
+```csharp
+public sealed class TypedOrderGateway([FromKeyedServices("orders")] IStreamPublisher publisher)
+{
+    public ValueTask<StreamId> PlaceAsync(string orderId, Order order, CancellationToken ct)
+        => publisher.PublishAsync(orderId, order, OrderJson.Default.Order, ct: ct);
+}
+```
+
+The same overload exists on `IStreamBufferedPublisher.EnqueueAsync`. Consuming is the mirror image —
+`Deserialize<T>` on a single `StreamMsg`, or on a whole `ReadOnlyMemory<StreamMsg>` batch at once:
+
+```csharp
+public sealed class TypedOrderHandler : IBatchHandler
+{
+    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    {
+        var orders = batch.Deserialize(OrderJson.Default.Order);
+        for (var i = 0; i < orders.Length; i++)
+        {
+            _ = orders[i];
+        }
+
+        return ValueTask.CompletedTask;
+    }
+}
+```
+
+Neither side checks `StreamMsg.Type` against `T` — a topic carrying more than one message type still
+branches on `Type` itself before deserialising, same as with the raw bytes API.
+
+---
+
 ## The outbox
 
 The problem the outbox solves is the two-write gap: a service writes its state, then publishes the

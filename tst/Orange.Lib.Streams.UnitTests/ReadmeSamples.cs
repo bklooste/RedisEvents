@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -24,7 +25,7 @@ namespace Orange.Lib.Streams.UnitTests;
 /// <b>If you change a sample here, change the matching block in the README, and vice versa.</b>
 /// The region names below match the README headings they appear under.
 /// </summary>
-public static class ReadmeSamples
+public static partial class ReadmeSamples
 {
     // ------------------------------------------------------------------ Quickstart
 
@@ -224,6 +225,41 @@ public static class ReadmeSamples
     {
         public ValueTask<StreamId> PlaceAsync(string orderId, ReadOnlyMemory<byte> body, CancellationToken ct)
             => publisher.PublishAsync(orderId, body, type: "OrderPlaced", ct: ct);
+    }
+
+    #endregion
+
+    // ---------------------------------------------------------- Typed publish and consume
+
+    #region typed-publish
+
+    /// <summary>
+    /// README — Typed publish and consume. <c>PublishAsync&lt;T&gt;</c> serialises <see cref="Order"/>
+    /// and defaults <c>type</c> to <c>typeof(Order).FullName</c> — no hand-written type string.
+    /// </summary>
+    public sealed class TypedOrderGateway([FromKeyedServices("orders")] IStreamPublisher publisher)
+    {
+        public ValueTask<StreamId> PlaceAsync(string orderId, Order order, CancellationToken ct)
+            => publisher.PublishAsync(orderId, order, OrderJson.Default.Order, ct: ct);
+    }
+
+    #endregion
+
+    #region typed-consume
+
+    /// <summary>README — Typed publish and consume. <c>Deserialize&lt;T&gt;</c> on a whole batch at once.</summary>
+    public sealed class TypedOrderHandler : IBatchHandler
+    {
+        public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+        {
+            var orders = batch.Deserialize(OrderJson.Default.Order);
+            for (var i = 0; i < orders.Length; i++)
+            {
+                _ = orders[i];
+            }
+
+            return ValueTask.CompletedTask;
+        }
     }
 
     #endregion
@@ -438,6 +474,14 @@ public static class ReadmeSamples
 
     /// <summary>The message the samples deserialise. Nothing in the library knows this type exists.</summary>
     public sealed record Order(string Id, decimal Stake);
+
+    /// <summary>
+    /// README — Typed publish and consume. Source-generated metadata for <see cref="Order"/>; see
+    /// <see cref="TypedPublishJson"/> in <c>TypedPublishTests</c> for why this is never a reflection-
+    /// based <c>JsonSerializerOptions</c> instead.
+    /// </summary>
+    [JsonSerializable(typeof(Order))]
+    internal sealed partial class OrderJson : JsonSerializerContext;
 
     /// <summary>Stand-in for whatever the handler actually does with a message.</summary>
     private static void Handle(in StreamMsg msg)
