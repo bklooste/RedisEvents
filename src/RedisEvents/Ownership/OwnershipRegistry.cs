@@ -494,12 +494,6 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         => this.lease ? Volatile.Read(ref this.held) : this.options.OwnedPartitions;
 
     /// <summary>
-    /// Every map observed by a registry in this process, for the health check and the admin endpoint.
-    /// </summary>
-    /// <returns>One map per topic/consumer pair claimed in this process.</returns>
-    public static IReadOnlyList<OwnershipMap> Snapshots() => [.. Observed.Values];
-
-    /// <summary>
     /// Whether any registry in this process last saw a gap or an overlap — the health check reports
     /// Degraded when this is true.
     /// </summary>

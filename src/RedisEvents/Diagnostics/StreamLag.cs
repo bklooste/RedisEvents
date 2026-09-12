@@ -105,9 +105,6 @@ internal sealed class StreamPartitionMonitor
     /// <summary>Why the partition stopped, when it has; <see langword="null"/> otherwise.</summary>
     internal string? StopReason => Volatile.Read(ref this.stopReason);
 
-    /// <summary>Whether this partition has processed anything yet.</summary>
-    internal bool HasPosition => Volatile.Read(ref this.lastProcessedMs) >= 0;
-
     /// <summary>The last id this partition processed, or <see cref="StreamId.Min"/> before the first batch.</summary>
     internal StreamId LastProcessed
     {

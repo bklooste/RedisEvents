@@ -180,19 +180,6 @@ public sealed class TestHandler : IBatchHandler, IMessageHandler
         }
     }
 
-    /// <summary>Forgets everything recorded so far. Waiters already pending are left alone.</summary>
-    public void Reset()
-    {
-        lock (this.gate)
-        {
-            this.messages.Clear();
-            this.threadIds.Clear();
-        }
-
-        Volatile.Write(ref this.batches, 0);
-        Volatile.Write(ref this.peakInFlight, 0);
-    }
-
     /// <inheritdoc />
     public async ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
     {

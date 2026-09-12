@@ -446,33 +446,6 @@ internal static partial class PartitionWorker
     }
 
     /// <summary>
-    /// The default multi-stream fetch: one <c>XREAD</c> on the shared multiplexer.
-    /// </summary>
-    /// <remarks>
-    /// <c>DemandMaster</c> because a stream must be read from the primary — a replica can lag
-    /// arbitrarily and would silently hand the consumer a stale tail. This is the
-    /// <c>ReadMode.Poll</c> transport; <c>ReadMode.Block</c> supplies its own fetch over the
-    /// dedicated <see cref="StreamReaderConnection"/>.
-    /// </remarks>
-    /// <param name="db">The shared multiplexer's database.</param>
-    /// <returns>A fetch delegate bound to <paramref name="db"/>.</returns>
-    internal static MultiStreamFetch SharedMultiStreamFetch(IDatabase db)
-    {
-        ArgumentNullException.ThrowIfNull(db);
-
-        return async (positions, countPerStream, ct) =>
-        {
-            ct.ThrowIfCancellationRequested();
-
-            var reply = await db
-                .StreamReadAsync(positions, countPerStream, CommandFlags.DemandMaster)
-                .ConfigureAwait(false);
-
-            return ToSlices(reply);
-        };
-    }
-
-    /// <summary>
     /// Maps StackExchange.Redis's own multi-stream reply onto <see cref="StreamSlice"/>.
     /// </summary>
     /// <remarks>
