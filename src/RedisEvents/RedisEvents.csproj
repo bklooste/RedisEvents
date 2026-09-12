@@ -22,6 +22,10 @@
 
 	<ItemGroup>
 		<PackageReference Include="StackExchange.Redis" Version="2.10.1" />
+		<!-- Pinned explicitly: StackExchange.Redis 2.10.1 depends on System.IO.Hashing >=9.0.10;
+		     leaving it transitive let NuGet resolve a lower version in some consumers, causing a
+		     runtime FileNotFoundException for System.IO.Hashing. -->
+		<PackageReference Include="System.IO.Hashing" Version="9.0.10" />
 		<PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
 		<!--
 		  R-25: these three replace <FrameworkReference Include="Microsoft.AspNetCore.App" />, which
