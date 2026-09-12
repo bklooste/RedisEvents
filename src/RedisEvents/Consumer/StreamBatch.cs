@@ -49,7 +49,7 @@ internal readonly record struct StreamBatch(StreamMsg[] Items, int Count, Stream
     /// The <see cref="StreamMsg.Type"/> a poisoned slot carries in <c>DEBUG</c> builds. Tests assert
     /// on it to prove a handler retained memory past its await.
     /// </summary>
-    internal const string PoisonType = "!! RedisEvents: this batch array was returned to the pool !!";
+    private const string PoisonType = "!! RedisEvents: this batch array was returned to the pool !!";
 
 #if DEBUG
     /// <summary>

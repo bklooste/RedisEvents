@@ -57,7 +57,7 @@ internal sealed class ConsumerGroupFetch
     /// claim it — long enough that a slow handler is never stolen from, short enough that a pod that
     /// died mid-batch is recovered within a deploy window.
     /// </summary>
-    internal const int DefaultClaimMinIdleMs = 30_000;
+    private const int DefaultClaimMinIdleMs = 30_000;
 
     /// <summary>How many pending entries one <c>XAUTOCLAIM</c> sweep will take at most.</summary>
     private const int ClaimBatchLimit = 100;
@@ -203,7 +203,7 @@ internal sealed class ConsumerGroupFetch
     /// <param name="ct">Observed before the call.</param>
     /// <returns><see langword="true"/> when this call created the group, <see langword="false"/> when it already existed.</returns>
     /// <exception cref="StreamTransportException">Redis refused the create for any reason other than <c>BUSYGROUP</c>.</exception>
-    internal static async ValueTask<bool> CreateGroupAsync(
+    private static async ValueTask<bool> CreateGroupAsync(
         IDatabase db,
         RedisKey key,
         string group,

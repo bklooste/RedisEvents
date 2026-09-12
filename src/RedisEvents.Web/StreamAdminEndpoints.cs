@@ -721,7 +721,7 @@ public static class StreamAdminEndpoints
     }
 
     /// <summary>Parses the from query parameter as a DateTimeOffset.</summary>
-    internal static DateTimeOffset? ParseFromParameter(string? from)
+    private static DateTimeOffset? ParseFromParameter(string? from)
     {
         if (string.IsNullOrWhiteSpace(from))
         {

@@ -79,7 +79,7 @@ internal static partial class PartitionWorker
     /// The single-partition inline loop. Mirrors <c>ReadLoopAsync</c> line for line, with
     /// <c>ProcessBatchAsync</c> where the channel write would be.
     /// </summary>
-    internal static async Task ReadInlineLoopAsync(
+    private static async Task ReadInlineLoopAsync(
         PartitionContext ctx,
         StreamId from,
         Func<CancellationToken, ValueTask<StreamEntryBatch>> fetch,

@@ -838,7 +838,7 @@ internal static partial class PartitionWorker
     /// </remarks>
     /// <param name="ex">The exception the fetch threw.</param>
     /// <returns><see langword="true"/> when the read should be retried after a backoff.</returns>
-    internal static bool IsTransientTransportFailure(Exception ex)
+    private static bool IsTransientTransportFailure(Exception ex)
         => ex switch
         {
             RedisConnectionException => true,

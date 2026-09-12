@@ -129,51 +129,51 @@ internal static class StreamsDiagnostics
     /// Observable gauge: 1 while a partition is blocked retrying a <c>DontIgnoreException</c>,
     /// 0 once it is not. Tags: topic, partition, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsBlocked = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsBlocked = Meter.CreateObservableGauge(
         "streams.blocked", () => Observe(BlockedValues), "status", "Whether a partition is blocked");
 
     /// <summary>
     /// Observable gauge: how long the currently blocked partition has been blocked. Tags: topic, partition, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<double> StreamsBlockDurationMs = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<double> StreamsBlockDurationMs = Meter.CreateObservableGauge(
         "streams.block.duration_ms", () => Observe(BlockDurationValues), "ms", "How long a partition has been blocked");
 
     /// <summary>
     /// Observable gauge: partitions this consumer group believes nobody owns. Tags: topic, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsPartitionsUnowned = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsPartitionsUnowned = Meter.CreateObservableGauge(
         "streams.partitions.unowned", () => Observe(UnownedPartitionsValues), "partitions", "Number of unowned partitions");
 
     /// <summary>
     /// Observable gauge: partitions claimed by more than one instance. Tags: topic, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsPartitionsContested = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsPartitionsContested = Meter.CreateObservableGauge(
         "streams.partitions.contested", () => Observe(ContestedPartitionsValues), "partitions", "Number of contested partitions");
 
     /// <summary>
     /// Observable gauge: entries between the consumer's position and the stream tail. Tags: topic, partition, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsLagEntries = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsLagEntries = Meter.CreateObservableGauge(
         "streams.lag.entries", () => Observe(LagEntriesValues), "entries", "Entries between the consumer position and the stream tail");
 
     /// <summary>
     /// Observable gauge: age of the oldest unprocessed entry. Tags: topic, partition, consumer.
     /// </summary>
-    internal static readonly ObservableGauge<double> StreamsLagMs = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<double> StreamsLagMs = Meter.CreateObservableGauge(
         "streams.lag.ms", () => Observe(LagMsValues), "ms", "Age of the oldest unprocessed entry");
 
     /// <summary>
     /// Observable gauge: entries waiting in a buffered publisher's queue. Tags: topic.
     /// A depth pinned at the bound means the producer is outrunning Redis.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsBufferQueued = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsBufferQueued = Meter.CreateObservableGauge(
         "streams.buffer.queued", () => Observe(BufferQueuedValues), "messages", "Entries waiting in a buffered publisher queue");
 
     /// <summary>
     /// Observable gauge: entries currently held in a partition's stream (<c>XLEN</c>). Tags: topic, partition.
     /// Compared against <c>MaxLen</c> to see how close trim is to eating unprocessed data.
     /// </summary>
-    internal static readonly ObservableGauge<long> StreamsStreamLength = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> StreamsStreamLength = Meter.CreateObservableGauge(
         "streams.stream.length", () => Observe(StreamLengthValues), "entries", "Entries currently held in a partition stream");
 
     // ---------------------------------------------------------------- setters

@@ -35,7 +35,7 @@ namespace RedisEvents.Diagnostics;
 internal static class StreamSpans
 {
     /// <summary>Span name prefix for the producer span; the topic is appended.</summary>
-    internal const string PublishSpanName = "streams.publish";
+    private const string PublishSpanName = "streams.publish";
 
     /// <summary>Span name prefix for the consumer span; the topic is appended.</summary>
     internal const string ProcessSpanName = StreamActivity.ProcessSpanName;

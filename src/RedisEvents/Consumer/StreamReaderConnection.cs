@@ -67,7 +67,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
     /// otherwise StackExchange.Redis times the blocking <c>XREAD</c> out client-side while Redis is
     /// still legitimately parked waiting for an entry.
     /// </summary>
-    internal const int TimeoutMarginMs = 5_000;
+    private const int TimeoutMarginMs = 5_000;
 
     private readonly IConnectionMultiplexer multiplexer;
     private readonly IDatabase db;

@@ -276,7 +276,7 @@ internal sealed class RedisPositionStore : IPositionStore
     /// <param name="partition">The partition.</param>
     /// <param name="suffix">One of the <c>Meta*Suffix</c> constants.</param>
     /// <returns>The field name.</returns>
-    internal static RedisValue MetaField(int partition, string suffix)
+    private static RedisValue MetaField(int partition, string suffix)
         => string.Concat(partition.ToString(CultureInfo.InvariantCulture), suffix);
 
     private static RedisValue[] BuildFieldNames()

@@ -169,7 +169,7 @@ internal static class StreamActivity
     /// A malformed or absent value is never an error: the message is still processed, it simply
     /// starts a new trace. Trace context is diagnostics, and diagnostics must not drop data.
     /// </remarks>
-    internal static bool TryParseTraceParent(string? traceParent, out ActivityContext context)
+    private static bool TryParseTraceParent(string? traceParent, out ActivityContext context)
     {
         if (string.IsNullOrEmpty(traceParent))
         {

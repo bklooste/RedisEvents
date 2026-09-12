@@ -215,7 +215,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
     /// presence lapses with its claims. It is not a number, so <see cref="ReadOwners"/> — and the
     /// admin endpoint that uses it — skip it.
     /// </remarks>
-    internal const string PresencePrefix = "i:";
+    private const string PresencePrefix = "i:";
 
     /// <summary>
     /// Prefix of the field used once at startup to prove the server understands <c>HEXPIRE</c>.
@@ -814,7 +814,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
     /// </summary>
     /// <param name="entries">The ownership hash as read back.</param>
     /// <returns>The number of live members; at least one, since the caller has just written its own.</returns>
-    internal static int CountMembers(HashEntry[] entries)
+    private static int CountMembers(HashEntry[] entries)
     {
         ArgumentNullException.ThrowIfNull(entries);
 
