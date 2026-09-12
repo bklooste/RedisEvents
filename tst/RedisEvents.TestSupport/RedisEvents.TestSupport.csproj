@@ -10,14 +10,14 @@
     <!--
       Shared integration-test plumbing (RedisStreamsFixture/RedisStreamsCollection/TestHandler) used
       by both RedisEvents.Tests and RedisEvents.EventSourcing.Tests. A plain library, not a test
-      project itself: xunit.v3 is referenced only so [CollectionDefinition]/ICollectionFixture<T>
+      project itself: xunit.v3.extensibility.core (not xunit.v3, whose build targets mark the project as a test project) is referenced only so [CollectionDefinition]/ICollectionFixture<T>
       compile, and there is deliberately no Microsoft.NET.Test.Sdk/xunit.runner.visualstudio here
       since this assembly never runs its own (empty) test session.
     -->
     <PackageReference Include="Testcontainers" Version="4.15.0" />
     <PackageReference Include="StackExchange.Redis" Version="2.10.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
-    <PackageReference Include="xunit.v3" Version="1.0.0" />
+    <PackageReference Include="xunit.v3.extensibility.core" Version="1.0.0" />
   </ItemGroup>
 
   <ItemGroup>
