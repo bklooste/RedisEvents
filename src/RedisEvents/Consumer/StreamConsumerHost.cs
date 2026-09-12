@@ -1864,7 +1864,6 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         /// <summary>Records the last successfully handled id. Allocation-free, never awaits.</summary>
         /// <param name="partition">Ignored — one acknowledger per partition already.</param>
-        /// <param name="id">The last id the handler completed.</param>
         internal void Record(int partition, StreamId id)
         {
             _ = partition;
@@ -1872,18 +1871,14 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         /// <summary>Acknowledges every fetched batch up to the last recorded id.</summary>
-        /// <param name="ct">Cancellation token.</param>
         /// <returns>A task that completes when the <c>XACK</c> has landed.</returns>
         internal ValueTask AcknowledgeAsync(CancellationToken ct) => fetch.AckAsync(this.last, ct);
     }
 
     /// <summary>One partition's worker, its own cancellation source, and its channel writer.</summary>
-    /// <param name="partition">The partition this worker owns.</param>
-    /// <param name="cts">The partition's cancellation source, linked to the host's.</param>
     /// <param name="writer">The channel writer, or <see langword="null"/> in inline mode.</param>
     private sealed class PartitionRunner(int partition, CancellationTokenSource cts, ChannelWriter<StreamBatch>? writer)
     {
-        /// <summary>The partition this worker owns.</summary>
         internal int Partition { get; } = partition;
 
         /// <summary>The read and processing loops, as one task.</summary>
@@ -1905,7 +1900,6 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             }
         }
 
-        /// <summary>Disposes the partition's cancellation source.</summary>
         internal void Dispose() => cts.Dispose();
     }
 }

@@ -30,13 +30,11 @@ internal readonly record struct StreamEntryBatch(StreamEntry[] Entries, int Coun
     /// <summary>A fetch that returned nothing — an idle stream, or a block that timed out.</summary>
     internal static StreamEntryBatch Empty => new([], 0);
 
-    /// <summary>Wraps a whole array.</summary>
     internal StreamEntryBatch(StreamEntry[] entries)
         : this(entries, entries.Length)
     {
     }
 
-    /// <summary>True when the fetch returned no entries.</summary>
     internal bool IsEmpty => Count == 0;
 
     /// <summary>The live entries.</summary>
@@ -61,13 +59,11 @@ internal readonly record struct StreamEntryBatch(StreamEntry[] Entries, int Coun
 /// <param name="Count">How many leading elements of <paramref name="Entries"/> are live.</param>
 internal readonly record struct StreamSlice(RedisKey Key, StreamEntry[] Entries, int Count)
 {
-    /// <summary>Wraps a whole array.</summary>
     internal StreamSlice(RedisKey key, StreamEntry[] entries)
         : this(key, entries, entries.Length)
     {
     }
 
-    /// <summary>True when this stream had nothing new.</summary>
     internal bool IsEmpty => Count == 0;
 
     /// <summary>The live entries.</summary>

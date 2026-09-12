@@ -265,17 +265,11 @@ internal sealed class RedisPositionStore : IPositionStore
     }
 
     /// <summary>The hash field a partition's position is stored under.</summary>
-    /// <param name="partition">The partition.</param>
-    /// <returns>The field name.</returns>
     internal static RedisValue Field(int partition)
         => (uint)partition < CachedFields
             ? FieldNames[partition]
             : partition.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>The meta-hash field for one partition and one attribute.</summary>
-    /// <param name="partition">The partition.</param>
-    /// <param name="suffix">One of the <c>Meta*Suffix</c> constants.</param>
-    /// <returns>The field name.</returns>
     private static RedisValue MetaField(int partition, string suffix)
         => string.Concat(partition.ToString(CultureInfo.InvariantCulture), suffix);
 

@@ -378,16 +378,9 @@ internal static class StreamsDiagnostics
     /// <summary>How a series key maps onto metric tags.</summary>
     private enum TagShape
     {
-        /// <summary>"topic".</summary>
         Topic = 0,
-
-        /// <summary>"topic:partition".</summary>
         TopicPartition = 1,
-
-        /// <summary>"topic:consumer".</summary>
         TopicConsumer = 2,
-
-        /// <summary>"topic:partition:consumer".</summary>
         TopicPartitionConsumer = 3,
     }
 

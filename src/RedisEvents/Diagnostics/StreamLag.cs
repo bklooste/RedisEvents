@@ -79,13 +79,10 @@ internal sealed class StreamPartitionMonitor
         this.StreamMetricKey = string.Concat(topic, ":", partition.ToString(CultureInfo.InvariantCulture));
     }
 
-    /// <summary>The topic this partition belongs to.</summary>
     internal string Topic { get; }
 
-    /// <summary>The consumer reading it.</summary>
     internal string Consumer { get; }
 
-    /// <summary>The partition index.</summary>
     internal int Partition { get; }
 
     /// <summary>The Redis key of the partition's stream, for the <c>XINFO STREAM</c> sample.</summary>
@@ -103,7 +100,6 @@ internal sealed class StreamPartitionMonitor
     /// <summary>Seconds a partition may stay blocked before the health check reports Unhealthy.</summary>
     internal int UnhealthyBlockSeconds { get; }
 
-    /// <summary>The worker's current state.</summary>
     internal PartitionRunState State => (PartitionRunState)Volatile.Read(ref this.state);
 
     /// <summary>Why the partition stopped, when it has; <see langword="null"/> otherwise.</summary>

@@ -376,7 +376,6 @@ public sealed class StreamsHealthCheck : IHealthCheck
         /// <summary>Partitions reading or retrying or still starting — anything that is not stopped.</summary>
         public int Live;
 
-        /// <summary>Partitions reading normally.</summary>
         public int Running;
 
         /// <summary>Partitions registered but not yet past their first fetch.</summary>
@@ -385,7 +384,6 @@ public sealed class StreamsHealthCheck : IHealthCheck
         /// <summary>Partitions blocked retrying a <c>DontIgnoreException</c>.</summary>
         public int Blocked;
 
-        /// <summary>Partitions that have stood down.</summary>
         public int Stopped;
 
         /// <summary>The largest lag seen this pass, in milliseconds.</summary>

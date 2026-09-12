@@ -775,9 +775,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         return args;
     }
 
-    /// <summary>The presence field one instance writes into the ownership hash.</summary>
-    /// <param name="instanceId">The instance.</param>
-    /// <returns><c>i:&lt;instanceId&gt;</c>.</returns>
+    /// <summary>The presence field one instance writes into the ownership hash: <c>i:&lt;instanceId&gt;</c>.</summary>
     internal static RedisValue PresenceField(Guid instanceId)
         => string.Concat(PresencePrefix, instanceId.ToString("D", CultureInfo.InvariantCulture));
 
