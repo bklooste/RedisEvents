@@ -66,14 +66,14 @@ jobs:
       - name: Restore
         run: dotnet restore AdvancedRedisStreams.slnx
 
-      - name: Pack Orange.Lib.Streams
+      - name: Pack RedisEvents
         run: >
-          dotnet pack src/Orange.Lib.Streams/Orange.Lib.Streams.csproj
+          dotnet pack src/RedisEvents/RedisEvents.csproj
           -c Release --no-restore -o nupkgs
 
-      - name: Pack Orange.Lib.Streams.Web
+      - name: Pack RedisEvents.Web
         run: >
-          dotnet pack src/Orange.Lib.Streams.Web/Orange.Lib.Streams.Web.csproj
+          dotnet pack src/RedisEvents.Web/RedisEvents.Web.csproj
           -c Release --no-restore -o nupkgs
 
       - name: NuGet login (OIDC -> temp API key)

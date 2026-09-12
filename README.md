@@ -1,7 +1,7 @@
 # AdvancedRedisStreams
 
 [![CI](https://github.com/bklooste/AdvancedRedisStreams/actions/workflows/ci.yml/badge.svg)](https://github.com/bklooste/AdvancedRedisStreams/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/Orange.Lib.Streams.svg)](https://www.nuget.org/packages/Orange.Lib.Streams)
+[![NuGet](https://img.shields.io/nuget/v/RedisEvents.svg)](https://www.nuget.org/packages/RedisEvents)
 
 A production-grade .NET messaging library built on **Redis Streams** — partitioned topics, ordered
 delivery per key, at-least-once semantics, and consumer positions stored durably in Redis. No broker
@@ -10,7 +10,7 @@ that is explicit rather than implicit.
 
 It grew out of internal service-to-service messaging for a live betting platform (order placement,
 settlement, feed ingestion) and is published here as a standalone library. The code ships under the
-original `Orange.Lib.Streams` / `Orange.Lib.Streams.Web` namespaces.
+original `RedisEvents` / `RedisEvents.Web` namespaces.
 
 ## Why Redis Streams instead of Kafka/RabbitMQ
 
@@ -36,7 +36,7 @@ original `Orange.Lib.Streams` / `Orange.Lib.Streams.Web` namespaces.
   message (no silent retry, no hidden dead-letter queue). A `DontIgnoreException` subclass blocks the
   partition and retries the same batch with exponential backoff (1s → 2 → 4 → 8 → 16 → 30s cap) until
   it succeeds, while every other partition keeps running. The choice is made by the exception type, not
-  by configuration — see [the error contract](src/Orange.Lib.Streams/README.md#the-error-contract).
+  by configuration — see [the error contract](src/RedisEvents/README.md#the-error-contract).
 - **Outbox / exactly-once state transition.** `Outbox.WriteAndPublishAsync` writes your application
   state and publishes the resulting event in one Redis transaction, closing the classic "state
   committed, event never published" gap — no separate outbox table or relay process needed.
@@ -53,10 +53,10 @@ original `Orange.Lib.Streams` / `Orange.Lib.Streams.Web` namespaces.
   `STREAMS_INSTANCE_INDEX` / `STREAMS_INSTANCE_COUNT` (or a StatefulSet pod ordinal) — no external
   leader election, no split-brain window.
 - **Admin & operability built in.** `StreamAdmin` exposes position preview/reset and ownership
-  inspection for runbooks; `Orange.Lib.Streams.Web` adds ASP.NET Core health checks and optional
+  inspection for runbooks; `RedisEvents.Web` adds ASP.NET Core health checks and optional
   minimal-API admin endpoints for the same operations, kept in a separate package so a headless worker
   never needs to reference ASP.NET Core.
-- **AOT-friendly and dependency-light.** The core library (`Orange.Lib.Streams`) targets `net10.0`,
+- **AOT-friendly and dependency-light.** The core library (`RedisEvents`) targets `net10.0`,
   is `IsAotCompatible`, and depends on nothing beyond `StackExchange.Redis`, `OpenTelemetry.Api`, and
   the `Microsoft.Extensions.*` abstractions — no ASP.NET Core reference required to run a consumer.
 - **OpenTelemetry metrics out of the box** — `streams.errors`, `streams.blocked`,
@@ -80,7 +80,7 @@ one un-tuned `redis:8-alpine` container) — a directional baseline, not an SLA.
 variance on shared/virtualized hardware is normal; re-run the suite on your own target
 infrastructure for numbers you'd actually size capacity against.
 
-**Throughput** — `dotnet test tst/Orange.Lib.Streams.Tests --filter "TestType=PerfTest"`, Release build:
+**Throughput** — `dotnet test tst/RedisEvents.Tests --filter "TestType=PerfTest"`, Release build:
 
 | Path | Configuration | Throughput |
 | --- | --- | --- |
@@ -103,9 +103,9 @@ size; pipelining or buffering removes that round trip from the hot path and thro
 one to two orders of magnitude. Pick direct publishing when a message must be durable the
 instant the call returns, and the buffered publisher when you can tolerate a small window of
 loss on crash in exchange for throughput — the trade-off is spelled out in
-[the buffered publisher docs](src/Orange.Lib.Streams/README.md).
+[the buffered publisher docs](src/RedisEvents/README.md).
 
-**Low-level latency** — `dotnet test tst/Orange.Lib.Streams.UnitTests --filter "TestType=PerfTest"`
+**Low-level latency** — `dotnet test tst/RedisEvents.UnitTests --filter "TestType=PerfTest"`
 (BenchmarkDotNet, Release build), the per-call cost every message pays on the hot path:
 
 | Operation | Mean | Allocations |
@@ -142,7 +142,7 @@ configured to enforce:
   unauthenticated client from reaching Redis at all, and is worth more than any
   application-level control.
 
-Two things worth calling out explicitly: [idempotency claims](src/Orange.Lib.Streams/README.md)
+Two things worth calling out explicitly: [idempotency claims](src/RedisEvents/README.md)
 and the outbox are correctness mechanisms, not authorization boundaries — they stop double
 processing, not a party with Redis access from reading or forging messages. Treat Redis
 credentials with the same care as a database password, since with `XADD`/`XRANGE` access to a
@@ -199,22 +199,22 @@ public sealed class OrderBatchHandler : IBatchHandler
 
 Full configuration reference, the outbox, idempotency helpers, and every sharp edge worth knowing
 about before running this in production are documented in
-**[src/Orange.Lib.Streams/README.md](src/Orange.Lib.Streams/README.md)** — read the error contract
+**[src/RedisEvents/README.md](src/RedisEvents/README.md)** — read the error contract
 section first; it is the part that isn't discoverable from the API surface.
 
 The ASP.NET Core health check and admin endpoints (position reset, ownership map) live in
-**[src/Orange.Lib.Streams.Web/README.md](src/Orange.Lib.Streams.Web/README.md)** and are an optional,
+**[src/RedisEvents.Web/README.md](src/RedisEvents.Web/README.md)** and are an optional,
 separate reference so a headless consumer never pulls in ASP.NET Core.
 
 ## Repository layout
 
 ```
 src/
-  Orange.Lib.Streams/       core library — producers, consumers, positions, outbox, admin, wire format
-  Orange.Lib.Streams.Web/   ASP.NET Core health check + admin minimal-API endpoints
+  RedisEvents/       core library — producers, consumers, positions, outbox, admin, wire format
+  RedisEvents.Web/   ASP.NET Core health check + admin minimal-API endpoints
 tst/
-  Orange.Lib.Streams.UnitTests/  fast, no-infrastructure unit tests (run in CI on every push)
-  Orange.Lib.Streams.Tests/      integration tests against a real Redis via Testcontainers
+  RedisEvents.UnitTests/  fast, no-infrastructure unit tests (run in CI on every push)
+  RedisEvents.Tests/      integration tests against a real Redis via Testcontainers
 ```
 
 ## Building & testing
@@ -225,14 +225,14 @@ Requires the .NET 10 SDK.
 dotnet build AdvancedRedisStreams.slnx
 
 # fast unit tests, no external dependencies
-dotnet test tst/Orange.Lib.Streams.UnitTests
+dotnet test tst/RedisEvents.UnitTests
 
 # integration tests — spins up Redis via Testcontainers, needs Docker
-dotnet test tst/Orange.Lib.Streams.Tests
+dotnet test tst/RedisEvents.Tests
 ```
 
-Every code sample in `src/Orange.Lib.Streams/README.md` is compiled as part of the unit test suite
-(`tst/Orange.Lib.Streams.UnitTests/ReadmeSamples.cs`), so the documentation cannot silently drift from
+Every code sample in `src/RedisEvents/README.md` is compiled as part of the unit test suite
+(`tst/RedisEvents.UnitTests/ReadmeSamples.cs`), so the documentation cannot silently drift from
 the API.
 
 ## License

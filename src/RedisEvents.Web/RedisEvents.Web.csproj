@@ -1,0 +1,38 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  R-25 (headless split). Everything in RedisEvents that needs ASP.NET Core or the
+	  health-check abstractions lives here, so a worker with no web host can reference
+	  RedisEvents alone. The regression guard for that is tst/RedisEvents.HeadlessSmoke.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>ASP.NET Core health checks and minimal-API admin endpoints for RedisEvents, kept separate so a headless worker can reference the core library without pulling in ASP.NET Core.</Description>
+		<PackageTags>redis;redis-streams;messaging;aspnetcore;health-checks</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+
+</Project>

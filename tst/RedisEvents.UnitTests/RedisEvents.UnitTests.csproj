@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <TreatWarningsAsErrors>False</TreatWarningsAsErrors>
+    <NoWarn>xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      P0-21 / R-21: the codec, router and id-parse micro-benchmarks. Deliberately here and nowhere
+      else: the library itself must not take a benchmarking dependency, and the service-test project
+      measures throughput against real Redis rather than per-call cost. The benchmarks run under the
+      PerfTest trait, so a TestType=UnitTest run never pays for them.
+    -->
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="xunit.v3" Version="1.0.0" />
+    <PackageReference Include="FluentAssertions" Version="8.8.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RedisEvents\RedisEvents.csproj" />
+    <!-- R-11: StreamAdminEndpoints lives in the Web library after the R-25 headless split. -->
+    <ProjectReference Include="..\..\src\RedisEvents.Web\RedisEvents.Web.csproj" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>
