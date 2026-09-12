@@ -12,7 +12,7 @@ It grew out of internal service-to-service messaging for a live betting platform
 settlement, feed ingestion) and is published here as a standalone library. The code ships under the
 original `RedisEvents` / `RedisEvents.Web` namespaces.
 
-## Why Redis Streams instead of Kafka/RabbitMQ
+## Why Redis Streams instead of Kafka/EventHub/RabbitMQ
 
 - **One less system to run.** If you already run Redis for caching or state, streams live in the same
   cluster — no separate broker, no Zookeeper/KRaft, no extra ops surface.
@@ -22,6 +22,7 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
 - **You get Kafka-shaped guarantees where they matter** — partitioned topics, per-key ordering,
   consumer groups with durable positions, replay from a point in time — without Kafka's operational
   weight.
+- **Positions stored in the DB by default** - so will return to current  state automatically on failure.
 - **It's fast, and the numbers below are measured, not marketed.** Publishing pipelines over
   `StackExchange.Redis`, batches and buffers rather than round-tripping per message, and the wire
   codec is a flat array with no serializer indirection — see [Performance](#performance) for real
@@ -64,6 +65,108 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   partition or a lagging trim is observable rather than silent.
 - **Zero required configuration.** `builder.AddStream<OrderHandler>("orders")` is a complete,
   working consumer; every setting has a sane default and is only overridden when you need to.
+
+## Quickstart
+
+A typed handler receives an already-deserialised value — no manual `JsonSerializer.Deserialize` call,
+no hand-written `type` string:
+
+```csharp
+[JsonSerializable(typeof(Order))]
+internal partial class OrderJson : JsonSerializerContext;
+
+public sealed class OrderHandler : IMessageHandler<Order>
+{
+    public ValueTask HandleAsync(in StreamMsg<Order> msg, CancellationToken ct)
+    {
+        Order? order = msg.Value;
+        // ... handle it
+        return ValueTask.CompletedTask;
+    }
+}
+
+builder.AddStream<OrderHandler, Order>("orders", OrderJson.Default.Order);
+```
+
+Publishing is the same shape — a `JsonTypeInfo<T>` in, no serialising or type string by hand:
+
+```csharp
+builder.AddStreamPublisher("orders");
+
+// later, injected as IStreamPublisher
+await publisher.PublishAsync(orderId, order, OrderJson.Default.Order, ct: ct);
+```
+
+Prefer raw bytes — your own (de)serialisation, no `JsonSerializerContext` to write? The untyped
+`IMessageHandler`/`IStreamPublisher` members are still there underneath and need no typed
+registration at all:
+
+```csharp
+public sealed class OrderHandler : IMessageHandler
+{
+    public ValueTask HandleAsync(in StreamMsg msg, CancellationToken ct)
+    {
+        var order = JsonSerializer.Deserialize<Order>(msg.Body.Span);
+        // ... handle it
+        return ValueTask.CompletedTask;
+    }
+}
+```
+
+```csharp
+await publisher.PublishAsync(orderId, body, type: "OrderPlaced", ct: ct);
+```
+
+### Batch handlers
+
+The same registration works with a handler that receives a whole batch at once instead of one
+message at a time — same partitioning, positions, and error handling underneath, just fewer round
+trips through the handler when per-message overhead adds up. Typed:
+
+```csharp
+public sealed class OrderBatchHandler : IBatchHandler<Order>
+{
+    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg<Order>> batch, CancellationToken ct)
+    {
+        for (var i = 0; i < batch.Length; i++)
+        {
+            Order? order = batch.Span[i].Value;
+            // ... handle it
+        }
+
+        return ValueTask.CompletedTask;
+    }
+}
+
+builder.AddStream<OrderBatchHandler, Order>("orders", OrderJson.Default.Order);
+```
+
+Or raw bytes, the same way as the single-message handler above:
+
+```csharp
+public sealed class OrderBatchHandler : IBatchHandler
+{
+    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    {
+        for (var i = 0; i < batch.Length; i++)
+        {
+            var order = JsonSerializer.Deserialize<Order>(batch.Span[i].Body.Span);
+            // ... handle it
+        }
+
+        return ValueTask.CompletedTask;
+    }
+}
+```
+
+Full configuration reference, the outbox, idempotency helpers, and every sharp edge worth knowing
+about before running this in production are documented in
+**[src/RedisEvents/README.md](src/RedisEvents/README.md)** — read the error contract
+section first; it is the part that isn't discoverable from the API surface.
+
+The ASP.NET Core health check and admin endpoints (position reset, ownership map) live in
+**[src/RedisEvents.Web/README.md](src/RedisEvents.Web/README.md)** and are an optional,
+separate reference so a headless consumer never pulls in ASP.NET Core.
 
 ## Performance
 
@@ -148,63 +251,7 @@ processing, not a party with Redis access from reading or forging messages. Trea
 credentials with the same care as a database password, since with `XADD`/`XRANGE` access to a
 topic's streams they effectively are one.
 
-## Quickstart
 
-```csharp
-builder.AddStream<OrderHandler>("orders");
-```
-
-```csharp
-public sealed class OrderHandler : IMessageHandler
-{
-    public ValueTask HandleAsync(in StreamMsg msg, CancellationToken ct)
-    {
-        var order = JsonSerializer.Deserialize<Order>(msg.Body.Span);
-        // ... handle it
-        return ValueTask.CompletedTask;
-    }
-}
-```
-
-Publishing:
-
-```csharp
-builder.AddStreamPublisher("orders");
-
-// later, injected as IStreamPublisher
-await publisher.PublishAsync(orderId, body, type: "OrderPlaced", ct: ct);
-```
-
-### Batch handlers
-
-The same `builder.AddStream<T>("orders")` registration works with a handler that receives a whole
-batch at once instead of one message at a time — same partitioning, positions, and error handling
-underneath, just fewer round trips through the handler when per-message overhead adds up:
-
-```csharp
-public sealed class OrderBatchHandler : IBatchHandler
-{
-    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
-    {
-        for (var i = 0; i < batch.Length; i++)
-        {
-            var order = JsonSerializer.Deserialize<Order>(batch.Span[i].Body.Span);
-            // ... handle it
-        }
-
-        return ValueTask.CompletedTask;
-    }
-}
-```
-
-Full configuration reference, the outbox, idempotency helpers, and every sharp edge worth knowing
-about before running this in production are documented in
-**[src/RedisEvents/README.md](src/RedisEvents/README.md)** — read the error contract
-section first; it is the part that isn't discoverable from the API surface.
-
-The ASP.NET Core health check and admin endpoints (position reset, ownership map) live in
-**[src/RedisEvents.Web/README.md](src/RedisEvents.Web/README.md)** and are an optional,
-separate reference so a headless consumer never pulls in ASP.NET Core.
 
 ## Repository layout
 
