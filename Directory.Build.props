@@ -3,8 +3,8 @@
 	<PropertyGroup>
 		<Authors>Ben Klooste</Authors>
 		<Copyright>Copyright (c) 2026 Ben Klooste</Copyright>
-		<PackageProjectUrl>https://github.com/bklooste/AdvancedRedisStreams</PackageProjectUrl>
-		<RepositoryUrl>https://github.com/bklooste/AdvancedRedisStreams</RepositoryUrl>
+		<PackageProjectUrl>https://github.com/bklooste/RedisEvents</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/bklooste/RedisEvents</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PublishRepositoryUrl>true</PublishRepositoryUrl>

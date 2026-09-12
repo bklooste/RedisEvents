@@ -1,6 +1,6 @@
-# AdvancedRedisStreams
+# RedisEvents
 
-[![CI](https://github.com/bklooste/AdvancedRedisStreams/actions/workflows/ci.yml/badge.svg)](https://github.com/bklooste/AdvancedRedisStreams/actions/workflows/ci.yml)
+[![CI](https://github.com/bklooste/RedisEvents/actions/workflows/ci.yml/badge.svg)](https://github.com/bklooste/RedisEvents/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/RedisEvents.svg)](https://www.nuget.org/packages/RedisEvents)
 
 A production-grade .NET messaging library built on **Redis Streams** — partitioned topics, ordered
@@ -222,7 +222,7 @@ tst/
 Requires the .NET 10 SDK.
 
 ```bash
-dotnet build AdvancedRedisStreams.slnx
+dotnet build RedisEvents.slnx
 
 # fast unit tests, no external dependencies
 dotnet test tst/RedisEvents.UnitTests

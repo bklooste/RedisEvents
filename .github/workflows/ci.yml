@@ -24,14 +24,14 @@ jobs:
           dotnet-version: "10.0.x"
 
       - name: Restore
-        run: dotnet restore AdvancedRedisStreams.slnx
+        run: dotnet restore RedisEvents.slnx
 
       - name: Build
-        run: dotnet build AdvancedRedisStreams.slnx -c Release --no-restore
+        run: dotnet build RedisEvents.slnx -c Release --no-restore
 
       - name: Test
         run: >
-          dotnet test AdvancedRedisStreams.slnx -c Release --no-build
+          dotnet test RedisEvents.slnx -c Release --no-build
           --filter "TestType!=PerfTest"
           --logger "trx"
           --results-directory TestResults
@@ -64,7 +64,7 @@ jobs:
           dotnet-version: "10.0.x"
 
       - name: Restore
-        run: dotnet restore AdvancedRedisStreams.slnx
+        run: dotnet restore RedisEvents.slnx
 
       - name: Pack RedisEvents
         run: >
