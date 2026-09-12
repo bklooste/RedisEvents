@@ -11,7 +11,8 @@ using StackExchange.Redis;
 namespace RedisEvents.Tests;
 
 /// <summary>
-/// The collection every RedisEvents service test belongs to.
+/// The collection name every RedisEvents service test belongs to, plus the doc comment that used to
+/// live on the <c>[CollectionDefinition]</c> itself.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,9 +25,19 @@ namespace RedisEvents.Tests;
 /// Classes in one collection do not run in parallel with each other, which is also what makes
 /// <see cref="RedisStreamsFixture.FlushAllAsync"/> safe to call between tests.
 /// </para>
+/// <para>
+/// <b>Why there is no <c>[CollectionDefinition]</c> here.</b> xUnit only discovers collection
+/// definitions declared in the assembly actually under test, not in a referenced library — this type
+/// lives in <c>RedisEvents.TestSupport</c>, which every consuming test assembly (RedisEvents.Tests,
+/// RedisEvents.EventSourcing.Tests) references but is never itself the assembly xUnit runs. Each of
+/// those assemblies therefore carries its own tiny <c>[CollectionDefinition(RedisStreamsCollection.Name)]
+/// : ICollectionFixture&lt;RedisStreamsFixture&gt;</c> registration (see
+/// <c>RedisStreamsCollectionRegistration.cs</c> in that project) that reuses this constant and the
+/// fixture class below — only the one-line registration is duplicated, not the fixture itself, and
+/// each assembly still gets exactly one container per the remarks above.
+/// </para>
 /// </remarks>
-[CollectionDefinition(RedisStreamsCollection.Name)]
-public sealed class RedisStreamsCollection : ICollectionFixture<RedisStreamsFixture>
+public static class RedisStreamsCollection
 {
     /// <summary>The collection name. Use the constant rather than retyping the string.</summary>
     public const string Name = "RedisStreams";

@@ -32,7 +32,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.MessagePack.UnitTests" />
 	</ItemGroup>
 
 </Project>

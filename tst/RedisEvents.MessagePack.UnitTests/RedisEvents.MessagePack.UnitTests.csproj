@@ -10,13 +10,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Testcontainers" Version="4.15.0" />
-    <PackageReference Include="StackExchange.Redis" Version="2.10.1" />
     <PackageReference Include="xunit.v3" Version="1.0.0" />
     <PackageReference Include="FluentAssertions" Version="8.8.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.2" />
+    <!-- HostApplicationBuilder for the registration tests; see the equivalent comment in
+         RedisEvents.EventSourcing.UnitTests.csproj. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -25,9 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\RedisEvents\RedisEvents.csproj" />
-    <!-- StreamsHealthCheck lives in the Web library after the R-25 headless split. -->
-    <ProjectReference Include="..\..\src\RedisEvents.Web\RedisEvents.Web.csproj" />
-    <ProjectReference Include="..\RedisEvents.TestSupport\RedisEvents.TestSupport.csproj" />
+    <ProjectReference Include="..\..\src\RedisEvents.MessagePack\RedisEvents.MessagePack.csproj" />
   </ItemGroup>
 
   <ItemGroup>

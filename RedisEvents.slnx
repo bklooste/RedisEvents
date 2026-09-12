@@ -8,8 +8,15 @@
   <Folder Name="/tst/">
     <Project Path="tst/RedisEvents.UnitTests/RedisEvents.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.Tests/RedisEvents.Tests.csproj" />
+    <Project Path="tst/RedisEvents.EventSourcing.UnitTests/RedisEvents.EventSourcing.UnitTests.csproj" />
+    <Project Path="tst/RedisEvents.EventSourcing.Tests/RedisEvents.EventSourcing.Tests.csproj" />
+    <Project Path="tst/RedisEvents.EventSourcing.Sample.Tests/RedisEvents.EventSourcing.Sample.Tests.csproj" />
+    <Project Path="tst/RedisEvents.MessagePack.UnitTests/RedisEvents.MessagePack.UnitTests.csproj" />
+    <Project Path="tst/RedisEvents.TestSupport/RedisEvents.TestSupport.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/RedisEvents.EventSourcing.Sample.Inventory/RedisEvents.EventSourcing.Sample.Inventory.csproj" />
+    <Project Path="samples/RedisEvents.EventSourcing.Sample.Inventory.CommandApi/RedisEvents.EventSourcing.Sample.Inventory.CommandApi.csproj" />
+    <Project Path="samples/RedisEvents.EventSourcing.Sample.Inventory.ViewApi/RedisEvents.EventSourcing.Sample.Inventory.ViewApi.csproj" />
   </Folder>
 </Solution>

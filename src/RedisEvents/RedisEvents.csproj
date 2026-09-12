@@ -43,6 +43,13 @@
 		<InternalsVisibleTo Include="RedisEvents.Web" />
 		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
 		<InternalsVisibleTo Include="RedisEvents.Tests" />
+		<!-- RedisEvents.TestSupport's RedisStreamsFixture drives instances via the internal OwnershipRegistry. -->
+		<InternalsVisibleTo Include="RedisEvents.TestSupport" />
+		<!-- MessagePackRegistrationTests asserts against the internal StreamRegistry. -->
+		<InternalsVisibleTo Include="RedisEvents.MessagePack.UnitTests" />
+		<!-- EventRepositoryTests/EventSourcingEndToEndTests/EventSourcingPerfBenchmarkTests reach
+		     StreamKeys/StreamStore/EntryCodec/RedisPositionStore directly. -->
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Tests" />
 		<!--
 		  R-23: the headless guard asserts the container built exactly one StreamConsumerHost, which
 		  is internal wiring after the public-surface trim. It is a test project, not a consumer.

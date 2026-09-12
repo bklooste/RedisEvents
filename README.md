@@ -271,10 +271,17 @@ src/
   RedisEvents.MessagePack/   MessagePack-typed publish/consume, with size-gated LZ4 compression
   RedisEvents.EventSourcing/ event-sourced aggregate root + typed event projector on top of streams
 samples/
-  RedisEvents.EventSourcing.Sample.Inventory/  a worked example (not published) used as test fixtures
+  RedisEvents.EventSourcing.Sample.Inventory/           a worked example (not published) used as test fixtures
+  RedisEvents.EventSourcing.Sample.Inventory.CommandApi/ runnable command-side microservice built on the sample above
+  RedisEvents.EventSourcing.Sample.Inventory.ViewApi/    runnable read-side microservice built on the sample above
 tst/
-  RedisEvents.UnitTests/  fast, no-infrastructure unit tests (run in CI on every push)
-  RedisEvents.Tests/      integration tests against a real Redis via Testcontainers
+  RedisEvents.UnitTests/                   core: fast, no-infrastructure unit tests
+  RedisEvents.Tests/                       core: integration tests against a real Redis via Testcontainers
+  RedisEvents.MessagePack.UnitTests/       RedisEvents.MessagePack unit tests
+  RedisEvents.EventSourcing.UnitTests/     RedisEvents.EventSourcing unit tests
+  RedisEvents.EventSourcing.Tests/         RedisEvents.EventSourcing integration tests against a real Redis
+  RedisEvents.EventSourcing.Sample.Tests/  both sample microservices hosted together over real HTTP and a real Redis
+  RedisEvents.TestSupport/                 shared Redis Testcontainers fixture used by the integration-test projects
 ```
 
 ## Building & testing
