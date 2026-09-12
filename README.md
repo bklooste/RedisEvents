@@ -69,6 +69,11 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   adds the same typed publish/consume convenience over MessagePack instead of JSON, with size-gated
   LZ4 compression — a message over 1024 bytes compresses automatically, decoding needs no
   special-casing either way, and the threshold (or auto-compression itself) is configurable.
+- **Event sourcing, as an opt-in package.** [`RedisEvents.EventSourcing`](src/RedisEvents.EventSourcing/README.md)
+  adds a light event-sourced aggregate root and a typed event projector on top of streams: an
+  aggregate's own Redis stream is its source of truth, saved with optimistic concurrency in the same
+  transaction that publishes to the topic, and a projector rides the ordinary consumer — so positions,
+  replay and the error contract are exactly core's, with nothing added on top.
 
 ## Quickstart
 
@@ -261,9 +266,12 @@ topic's streams they effectively are one.
 
 ```
 src/
-  RedisEvents/             core library — producers, consumers, positions, outbox, admin, wire format
-  RedisEvents.Web/         ASP.NET Core health check + admin minimal-API endpoints
-  RedisEvents.MessagePack/ MessagePack-typed publish/consume, with size-gated LZ4 compression
+  RedisEvents/               core library — producers, consumers, positions, outbox, admin, wire format
+  RedisEvents.Web/           ASP.NET Core health check + admin minimal-API endpoints
+  RedisEvents.MessagePack/   MessagePack-typed publish/consume, with size-gated LZ4 compression
+  RedisEvents.EventSourcing/ event-sourced aggregate root + typed event projector on top of streams
+samples/
+  RedisEvents.EventSourcing.Sample.Inventory/  a worked example (not published) used as test fixtures
 tst/
   RedisEvents.UnitTests/  fast, no-infrastructure unit tests (run in CI on every push)
   RedisEvents.Tests/      integration tests against a real Redis via Testcontainers

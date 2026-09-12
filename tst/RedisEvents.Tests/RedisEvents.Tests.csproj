@@ -27,6 +27,8 @@
     <ProjectReference Include="..\..\src\RedisEvents\RedisEvents.csproj" />
     <!-- StreamsHealthCheck lives in the Web library after the R-25 headless split. -->
     <ProjectReference Include="..\..\src\RedisEvents.Web\RedisEvents.Web.csproj" />
+    <ProjectReference Include="..\..\src\RedisEvents.EventSourcing\RedisEvents.EventSourcing.csproj" />
+    <ProjectReference Include="..\..\samples\RedisEvents.EventSourcing.Sample.Inventory\RedisEvents.EventSourcing.Sample.Inventory.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,9 +3,13 @@
     <Project Path="src/RedisEvents/RedisEvents.csproj" />
     <Project Path="src/RedisEvents.Web/RedisEvents.Web.csproj" />
     <Project Path="src/RedisEvents.MessagePack/RedisEvents.MessagePack.csproj" />
+    <Project Path="src/RedisEvents.EventSourcing/RedisEvents.EventSourcing.csproj" />
   </Folder>
   <Folder Name="/tst/">
     <Project Path="tst/RedisEvents.UnitTests/RedisEvents.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.Tests/RedisEvents.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/RedisEvents.EventSourcing.Sample.Inventory/RedisEvents.EventSourcing.Sample.Inventory.csproj" />
   </Folder>
 </Solution>

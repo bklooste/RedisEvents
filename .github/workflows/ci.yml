@@ -81,6 +81,11 @@ jobs:
           dotnet pack src/RedisEvents.MessagePack/RedisEvents.MessagePack.csproj
           -c Release --no-restore -o nupkgs
 
+      - name: Pack RedisEvents.EventSourcing
+        run: >
+          dotnet pack src/RedisEvents.EventSourcing/RedisEvents.EventSourcing.csproj
+          -c Release --no-restore -o nupkgs
+
       - name: NuGet login (OIDC -> temp API key)
         uses: NuGet/login@v1
         id: login

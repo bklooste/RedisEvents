@@ -13,6 +13,20 @@ actually changed.
   `IBatchHandler<T>` registration, mirroring the JSON typed convenience in core. Bodies over 1024
   bytes (configurable) are automatically LZ4-compressed; decoding needs no special handling either
   way. Kept as a separate package, like `RedisEvents.Web`, so core carries no MessagePack dependency.
+- **`RedisEvents.EventSourcing`**: a light event-sourced aggregate root (`AggregateRoot`, `On<TEvent>`/
+  `Raise<TEvent>`, no reflection or `dynamic` dispatch) and a typed event projector
+  (`IProjection<TEvent>`, `EventProjector`) on top of streams. An aggregate's own Redis stream is the
+  source of truth; `IEventRepository.SaveAsync` appends to it and publishes to the topic in one
+  transaction, guarded by an optimistic-concurrency check (`ConcurrencyException` on a lost race). The
+  event-type registry (`EventTypeRegistry`) maps a stable wire-type string to a CLR type explicitly, so
+  a class rename never breaks replay, and plugs into any serialiser (JSON by default, MessagePack via
+  a lambda pair, no new dependency). The projector rides core's ordinary consumer, so positions, replay
+  and the error contract are exactly core's. `IViewStore<TView>` + a Redis-backed implementation give a
+  minimal read-model store; a service may swap in its own (Azure Tables, SQL, …). Core gained a small
+  supporting primitive, `IStreamStore` (`Producer.IStreamStore`/`AddStreamStore`), and a
+  `StreamsConnection.GetSharedDatabase` facade, both usable directly. See
+  [`src/RedisEvents.EventSourcing/README.md`](src/RedisEvents.EventSourcing/README.md) and the worked
+  example under `samples/RedisEvents.EventSourcing.Sample.Inventory/`.
 
 ## 2026-09-12
 

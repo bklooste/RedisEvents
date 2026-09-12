@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<IsPackable>false</IsPackable>
+		<IsPublishable>false</IsPublishable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\RedisEvents.EventSourcing\RedisEvents.EventSourcing.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Both test projects use this sample as their event-sourcing fixtures, including its
+		     internal InventoryEventTypes.Register and InventoryJsonContext. -->
+		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.Tests" />
+	</ItemGroup>
+
+</Project>

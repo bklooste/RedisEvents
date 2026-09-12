@@ -41,20 +41,31 @@ internal sealed record StreamConsumerRegistration(
 internal sealed record StreamPublisherRegistration(ProducerOptions Options);
 
 /// <summary>
-/// The set of consumers and publishers declared during registration. Registered as a singleton so
-/// the consumer host and publisher factory (P1/P2) can enumerate what the service asked for, and so
-/// duplicate <c>(Topic, Consumer)</c> pairs are caught at startup rather than at 3am.
+/// One state store declared by an <c>AddStreamStore</c> call.
+/// </summary>
+/// <param name="Topic">The topic the store appends alongside.</param>
+/// <param name="Options">The topic's effective options, as the store's publishes are routed and trimmed by.</param>
+internal sealed record StreamStoreRegistration(string Topic, TopicOptions Options);
+
+/// <summary>
+/// The set of consumers, publishers and state stores declared during registration. Registered as a
+/// singleton so the consumer host and publisher factory (P1/P2) can enumerate what the service asked
+/// for, and so duplicate <c>(Topic, Consumer)</c> pairs are caught at startup rather than at 3am.
 /// </summary>
 internal sealed class StreamRegistry
 {
     private readonly List<StreamConsumerRegistration> consumers = [];
     private readonly List<StreamPublisherRegistration> publishers = [];
+    private readonly List<StreamStoreRegistration> stores = [];
 
     /// <summary>Every consumer declared by an <c>AddStream</c> overload, in registration order.</summary>
     public IReadOnlyList<StreamConsumerRegistration> Consumers => this.consumers;
 
     /// <summary>Every publisher declared by <c>AddStreamPublisher</c>, in registration order.</summary>
     public IReadOnlyList<StreamPublisherRegistration> Publishers => this.publishers;
+
+    /// <summary>Every state store declared by <c>AddStreamStore</c>, in registration order.</summary>
+    public IReadOnlyList<StreamStoreRegistration> Stores => this.stores;
 
     /// <summary>
     /// Records a consumer. Two consumers on the same <c>(Topic, Consumer)</c> pair in one process
@@ -98,6 +109,25 @@ internal sealed class StreamRegistry
 
         this.publishers.Add(registration);
     }
+
+    /// <summary>
+    /// Records a state store. A second store on the same topic is ignored, for the same reason a
+    /// second publisher is: one per topic is all a process needs, and registering the singleton
+    /// twice would put two objects behind one interface.
+    /// </summary>
+    /// <param name="registration">The store to add.</param>
+    public void Add(StreamStoreRegistration registration)
+    {
+        ArgumentNullException.ThrowIfNull(registration);
+
+        foreach (var existing in this.stores)
+        {
+            if (string.Equals(existing.Topic, registration.Topic, StringComparison.Ordinal))
+                return;
+        }
+
+        this.stores.Add(registration);
+    }
 }
 
 /// <summary>
@@ -113,6 +143,7 @@ public static class StreamsBuilderExtensions
     private const string OptionsKey = "RedisEvents:StreamOptions";
     private const string RegistryKey = "RedisEvents:StreamRegistry";
     private const string PublisherDefaultsKey = "RedisEvents:PublisherDefaults";
+    private const string StoreDefaultsKey = "RedisEvents:StoreDefaults";
 
     /// <summary>
     /// Zero-config registration: consume <paramref name="topic"/> with <typeparamref name="THandler"/>,
@@ -578,6 +609,98 @@ public static class StreamsBuilderExtensions
 
         RegisterDefaults(builder);
         return builder;
+    }
+
+    /// <summary>
+    /// Registers an <see cref="IStreamStore"/> for <paramref name="topic"/>: state streams in the
+    /// topic's own hash slot, appended and published in one <c>MULTI</c>/<c>EXEC</c>.
+    /// </summary>
+    /// <remarks>
+    /// Keyed by topic with an unkeyed fallback, exactly like <see cref="AddStreamPublisher"/>: a
+    /// service with one store injects <see cref="IStreamStore"/>, and one with several asks for the
+    /// topic it means. It needs no <c>AddStreamPublisher</c> alongside it — the store is a writer in
+    /// its own right, going through <see cref="Outbox"/> rather than through a publisher — though a
+    /// service that also publishes plain events to the same topic may register both.
+    /// </remarks>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="topic">The topic to publish to, whose slot the state streams share.</param>
+    /// <returns>The builder, for chaining.</returns>
+    /// <exception cref="StreamConfigurationException">
+    /// The topic sets <c>CoLocatePartitions: false</c>, which spreads its partition streams across
+    /// cluster slots so no state key can share a transaction with them. It is refused here, at
+    /// startup, because there is no non-transactional fallback to offer.
+    /// </exception>
+    public static IHostApplicationBuilder AddStreamStore(this IHostApplicationBuilder builder, string topic)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(topic);
+
+        var options = Core(builder);
+        var topicOptions = options.Topics.TryGetValue(topic, out var configured) ? configured : new TopicOptions();
+
+        // Before the container is even built, not on the first append: an event store with no
+        // transaction is not a weaker event store, it is a broken one.
+        StreamStore.RequireCoLocatedPartitions(topic, topicOptions);
+
+        var registry = Registry(builder);
+        var before = registry.Stores.Count;
+        registry.Add(new StreamStoreRegistration(topic, topicOptions));
+
+        // A second AddStreamStore for the same topic is a no-op, as a second AddStreamPublisher is.
+        if (registry.Stores.Count == before)
+            return builder;
+
+        // object? not object: the keyed-factory delegate declares a nullable key — see AddStreamPublisher.
+        builder.Services.AddKeyedSingleton<IStreamStore>(
+            topic,
+            (IServiceProvider sp, object? _) => new StreamStore(
+                sp.GetRequiredService<StreamsConnectionProvider>().Connection.GetDatabase(),
+                topic,
+                topicOptions));
+
+        RegisterStoreDefault(builder);
+        return builder;
+    }
+
+    /// <summary>
+    /// Registers the unkeyed <see cref="IStreamStore"/> resolution once per builder, resolved through
+    /// the <see cref="StreamRegistry"/> at container-build time so "is there exactly one store?" is
+    /// answered after every <c>AddStreamStore</c> call has run rather than after the first.
+    /// </summary>
+    private static void RegisterStoreDefault(IHostApplicationBuilder builder)
+    {
+        if (builder.Properties.ContainsKey(StoreDefaultsKey))
+            return;
+
+        builder.Properties[StoreDefaultsKey] = true;
+
+        builder.Services.AddSingleton(sp => sp.GetRequiredKeyedService<IStreamStore>(SoleStoreTopic(sp)));
+    }
+
+    /// <summary>
+    /// The topic of the only registered state store. A service with more than one must ask for the
+    /// one it means — <c>[FromKeyedServices("topic")]</c> — because an unkeyed resolution could
+    /// otherwise silently write an aggregate's history into another topic's slot.
+    /// </summary>
+    private static string SoleStoreTopic(IServiceProvider services)
+    {
+        var stores = services.GetRequiredService<StreamRegistry>().Stores;
+
+        if (stores.Count == 1)
+        {
+            return stores[0].Topic;
+        }
+
+        if (stores.Count == 0)
+        {
+            throw new StreamConfigurationException(
+                $"Streams: no state store is registered, so {nameof(IStreamStore)} cannot be resolved. Call AddStreamStore(topic) first.");
+        }
+
+        var topics = string.Join(", ", stores.Select(s => s.Topic));
+        throw new StreamConfigurationException(
+            $"Streams: {stores.Count} state stores are registered ({topics}), so an unkeyed {nameof(IStreamStore)} is ambiguous. " +
+            $"Inject [FromKeyedServices(\"<topic>\")] {nameof(IStreamStore)} instead.");
     }
 
     /// <summary>

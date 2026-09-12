@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>Event-sourced aggregates and typed projections over RedisEvents: per-aggregate Redis streams as the source of truth, optimistic concurrency, and reflection-free event dispatch.</Description>
+		<PackageTags>redis;redis-streams;event-sourcing;cqrs;projections</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.Tests" />
+	</ItemGroup>
+
+</Project>

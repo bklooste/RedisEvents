@@ -10,6 +10,48 @@ using StackExchange.Redis;
 namespace RedisEvents.Extensions;
 
 /// <summary>
+/// The shared streams connection, for code that has to speak to the same Redis the library does.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The resolver itself (<see cref="StreamsConnectionProvider"/>) is internal, and core deliberately
+/// registers no <see cref="IConnectionMultiplexer"/> of its own — a service's cache connection must
+/// never be mistaken for the streams one. This is the three-line facade over it, so a sibling
+/// package or a service can put its own keys (a view store's hashes, say) on the connection the
+/// library already holds instead of opening a second one to the same server.
+/// </para>
+/// <para>
+/// It is the <b>shared</b> connection: the one writes, positions and admin work go through, never a
+/// consumer's dedicated reader multiplexer, which is read-only and may be parked in a blocking
+/// <c>XREAD</c>. It is resolved once per process and cached, and the endpoint-match guard has
+/// already run on it — which is the point of going through here rather than connecting by hand.
+/// </para>
+/// </remarks>
+public static class StreamsConnection
+{
+    /// <summary>
+    /// The shared streams <see cref="IDatabase"/>, connecting on first use.
+    /// </summary>
+    /// <param name="services">A built container that has had an <c>AddStream…</c> call on its builder.</param>
+    /// <returns>A database handle on the shared streams multiplexer.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="services"/> is null.</exception>
+    /// <exception cref="StreamConfigurationException">Nothing in the container registered the streams connection — no <c>AddStream…</c> call was made.</exception>
+    /// <exception cref="StreamTransportException">The library's own connect attempt failed.</exception>
+    public static IDatabase GetSharedDatabase(IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        var provider = services.GetService<StreamsConnectionProvider>()
+            ?? throw new StreamConfigurationException(
+                "Streams: the shared connection is not registered, so there is no streams database to hand out. " +
+                "It is registered by the first AddStream/AddStreamPublisher/AddStreamStore call on the host builder; " +
+                "make one before asking for the connection.");
+
+        return provider.Connection.GetDatabase();
+    }
+}
+
+/// <summary>
 /// Where the shared streams multiplexer came from.
 /// </summary>
 internal enum StreamsConnectionSource
