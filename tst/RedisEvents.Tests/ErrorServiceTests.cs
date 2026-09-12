@@ -610,7 +610,7 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
         var container = new ContainerBuilder()
             .WithImage(RedisStreamsFixture.Image)
             .WithPortBinding(6379, assignRandomHostPort: true)
-            .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(6379))
+            .WithWaitStrategy(Wait.ForUnixContainer().UntilExternalTcpPortIsAvailable(6379))
             .Build();
 
         await container.StartAsync();

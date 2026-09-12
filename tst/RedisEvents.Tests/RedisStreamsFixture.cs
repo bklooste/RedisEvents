@@ -323,7 +323,7 @@ public sealed class RedisStreamsFixture : IAsyncLifetime
                 var started = new ContainerBuilder()
                     .WithImage(Image)
                     .WithPortBinding(RedisPort, assignRandomHostPort: true)
-                    .WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(RedisPort))
+                    .WithWaitStrategy(Wait.ForUnixContainer().UntilExternalTcpPortIsAvailable(RedisPort))
                     .Build();
 
                 await started.StartAsync().ConfigureAwait(false);
