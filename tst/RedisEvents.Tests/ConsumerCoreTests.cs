@@ -286,6 +286,40 @@ public sealed class ConsumerCoreTests(RedisStreamsFixture fixture)
             .BeEmpty("a completed channel is an ordinary stop, not a fault (R-09)");
     }
 
+    /// <summary>
+    /// Overlapping stops — what minimal hosting produces when <c>app.Run()</c> and the host's own
+    /// <c>StopAsync</c> both stop the consumer — must not throw.
+    /// </summary>
+    /// <remarks>
+    /// The second stop used to capture the host's source before queueing on the gate, then cancel it
+    /// after the first stop had disposed it: an <see cref="ObjectDisposedException"/> out of
+    /// <c>StopAsync</c>. Neither call is awaited before the next begins, so the first is parked in its
+    /// drain while the second reaches the gate — the interleaving is deterministic.
+    /// </remarks>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Overlapping_stops_and_dispose_do_not_throw()
+    {
+        await this.ResetAsync();
+
+        var topic = fixture.NewTopic();
+        var consumer = fixture.NewConsumer();
+        var topicOptions = new TopicOptions { Partitions = 2 };
+
+        await using var rig = this.Build(topic, topicOptions, Options(topic, ErrorPolicy.BestEffort), consumer, new TestHandler());
+
+        await rig.Host.StartAsync(CancellationToken.None);
+
+        var first = rig.Host.StopAsync(CancellationToken.None);
+        var second = rig.Host.StopAsync(CancellationToken.None);
+        var disposing = rig.Host.DisposeAsync().AsTask();
+
+        var overlapping = async () => await Task.WhenAll(first, second, disposing);
+
+        await overlapping.Should().NotThrowAsync();
+        rig.Host.IsRunning.Should().BeFalse();
+    }
+
     private static ConsumerOptions Options(string topic, ErrorPolicy onError)
         => new()
         {

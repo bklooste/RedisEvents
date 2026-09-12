@@ -283,6 +283,27 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(this.disposed, this);
 
+        // Held for the whole start, from before the host's source exists: a stop arriving mid-start
+        // then waits for a fully built host and tears it down, rather than disposing the source this
+        // start is about to link its workers to. A lease change landing mid-start waits too, and the
+        // rebalance it runs afterwards compares against what this start left running.
+        await this.rebalanceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await this.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            this.rebalanceGate.Release();
+        }
+    }
+
+    /// <summary>The body of <see cref="StartAsync"/>; the caller holds <see cref="rebalanceGate"/>.</summary>
+    private async Task StartCoreAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(this.disposed, this);
+
         if (this.cts is not null)
         {
             return;
@@ -346,57 +367,45 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             return;
         }
 
-        // Held from here to the end of the start, so a lease change that lands while the read side is
-        // still coming up waits rather than racing it. The rebalance it runs afterwards compares
-        // against what this start actually left running, so an overtaken notification is a no-op.
-        await this.rebalanceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            this.ownership = new OwnershipRegistry(
-                redis,
-                new OwnershipRegistryOptions
-                {
-                    Topic = topic,
-                    Consumer = this.consumerName,
-                    Partitions = topicOptions.Partitions,
-                    OwnedPartitions = owned,
-                    PodName = podName,
-                    Mode = leased ? InstanceMode.Lease : InstanceMode.Static,
-                    TtlSeconds = instances?.LeaseTtlSeconds ?? InstanceOptions.DefaultLeaseTtlSeconds,
-                    RenewSeconds = instances?.LeaseRenewSeconds ?? InstanceOptions.DefaultLeaseRenewSeconds,
-                    OnLeaseChanged = leased ? this.OnLeaseChanged : null,
-                },
-                this.log);
-
-            await this.ownership.StartAsync(cancellationToken).ConfigureAwait(false);
-
-            if (leased)
+        this.ownership = new OwnershipRegistry(
+            redis,
+            new OwnershipRegistryOptions
             {
-                owned = [.. this.ownership.Held];
-                this.OwnedPartitions = owned;
+                Topic = topic,
+                Consumer = this.consumerName,
+                Partitions = topicOptions.Partitions,
+                OwnedPartitions = owned,
+                PodName = podName,
+                Mode = leased ? InstanceMode.Lease : InstanceMode.Static,
+                TtlSeconds = instances?.LeaseTtlSeconds ?? InstanceOptions.DefaultLeaseTtlSeconds,
+                RenewSeconds = instances?.LeaseRenewSeconds ?? InstanceOptions.DefaultLeaseRenewSeconds,
+                OnLeaseChanged = leased ? this.OnLeaseChanged : null,
+            },
+            this.log);
 
-                if (owned.Length == 0)
-                {
-                    // Every partition is leased by somebody else — more instances than partitions, or
-                    // a rollout that has not rebalanced yet. Nothing to start; the renewal loop calls
-                    // back the moment a lease lapses.
-                    this.log.LogInformation(
-                        "Streams: consumer {Consumer} on topic {Topic} holds no lease yet — its {Partitions} partitions are all " +
-                        "claimed by other instances. It starts no workers and picks partitions up as leases lapse.",
-                        this.consumerName,
-                        topic,
-                        topicOptions.Partitions);
-                    return;
-                }
-            }
+        await this.ownership.StartAsync(cancellationToken).ConfigureAwait(false);
 
-            await this.StartReadSideAsync(owned, topicOptions, db, cancellationToken).ConfigureAwait(false);
-        }
-        finally
+        if (leased)
         {
-            this.rebalanceGate.Release();
+            owned = [.. this.ownership.Held];
+            this.OwnedPartitions = owned;
+
+            if (owned.Length == 0)
+            {
+                // Every partition is leased by somebody else — more instances than partitions, or
+                // a rollout that has not rebalanced yet. Nothing to start; the renewal loop calls
+                // back the moment a lease lapses.
+                this.log.LogInformation(
+                    "Streams: consumer {Consumer} on topic {Topic} holds no lease yet — its {Partitions} partitions are all " +
+                    "claimed by other instances. It starts no workers and picks partitions up as leases lapse.",
+                    this.consumerName,
+                    topic,
+                    topicOptions.Partitions);
+                return;
+            }
         }
+
+        await this.StartReadSideAsync(owned, topicOptions, db, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -589,11 +598,6 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// </remarks>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (this.cts is not { } source)
-        {
-            return;
-        }
-
         // Read by the fault handler: a worker that faults because the host is winding down must not
         // be reported as an ErrorPolicy.Fail and must not stop an application that is already stopping.
         // Set before the gate, so a lease rebalance queued behind it gives up rather than rebuilding
@@ -610,6 +614,18 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         try
         {
+            // Read under the gate, never before it. Stops overlap in practice — minimal hosting's
+            // app.Run() and the host's own StopAsync both stop every hosted service — and a second
+            // stop that captured the source before queueing here would cancel it after the first
+            // stop had disposed it.
+            if (this.cts is not { } source)
+            {
+                return;
+            }
+
+            // Again, because a start that held the gate when the flag was first set resets it.
+            this.stopping = true;
+
             this.log.LogInformation(
                 "Streams: stopping consumer {Consumer} on topic {Topic}; draining {Partitions} partitions with a {TimeoutSeconds}s budget.",
                 this.consumerName,
@@ -905,13 +921,21 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             return;
         }
 
-        if (this.cts is not null)
-        {
-            await this.StopAsync(CancellationToken.None).ConfigureAwait(false);
-        }
+        this.stopping = true;
 
-        await this.ReleaseAsync().ConfigureAwait(false);
-        this.disposed = true;
+        await this.StopAsync(CancellationToken.None).ConfigureAwait(false);
+
+        await this.rebalanceGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+
+        try
+        {
+            await this.ReleaseAsync().ConfigureAwait(false);
+            this.disposed = true;
+        }
+        finally
+        {
+            this.rebalanceGate.Release();
+        }
     }
 
     /// <summary>
