@@ -296,9 +296,74 @@ with backoff while every other partition keeps running.
 
 ## Benchmarks
 
-`dotnet test --filter "TestType=PerfTest"` runs, alongside core's own: an in-process
+This package is measured at three levels, each isolating a different thing: an in-process
 `[MemoryDiagnoser]` micro-benchmark for `SaveAsync`/`EventProjector.HandleAsync`'s own per-call cost
-(no Redis), and a real-Redis throughput benchmark reporting save/load throughput and save-to-projected-
-view latency. Neither asserts on absolute numbers — a CI box's throughput is not a contract; they
-exist so a change that regresses this package's hot path shows up before a reviewer has to notice it
-by eye.
+with no Redis anywhere; a real-Redis, no-HTTP benchmark for `RedisEventRepository` throughput and the
+save-to-projected-view latency a single process sees; and the real Inventory sample — two
+independently hosted ASP.NET Core services, [`.CommandApi`](../../samples/RedisEvents.EventSourcing.Sample.Inventory.CommandApi)
+and [`.ViewApi`](../../samples/RedisEvents.EventSourcing.Sample.Inventory.ViewApi) — talking only
+over real HTTP and a real Redis topic between them. The first two show what the library costs in
+isolation; the third is the number that actually matters for a CQRS split like this one, because it's
+the only one that includes the HTTP hops and two separate processes a real deployment would have.
+None of these tests assert on absolute numbers — a CI box's throughput is not a contract; they exist
+so a change that regresses this package's hot path shows up before a reviewer has to notice it by eye.
+
+The numbers below are from this repo's own suites, run on the same single dev machine as the root
+README's [Performance](../../README.md#performance) numbers (13th Gen Intel Core i7-13700KF, WSL2,
+one un-tuned `redis:8-alpine` container via Testcontainers) — a directional baseline, not an SLA.
+Run-to-run variance on shared/virtualized hardware is normal; re-run the suites on your own target
+infrastructure for numbers you'd actually size capacity against.
+
+**Table 1 — micro-benchmark** (`EventSourcingMicroBenchmarks.cs`, BenchmarkDotNet, no Redis):
+
+```
+dotnet test tst/RedisEvents.EventSourcing.UnitTests --filter "TestType=PerfTest"
+```
+
+| Operation | Mean | Allocated |
+| --- | --- | --- |
+| `Save_one_event` (`RedisEventRepository.SaveAsync`, 1 event) | ~570 ns | ~1,088 B |
+| `Save_batch_of_ten` (`RedisEventRepository.SaveAsync`, 10 events) | ~4.12 μs | ~4,280 B |
+| `Decode_and_dispatch_one_event` (`EventProjector.HandleAsync`) | ~260 ns | ~352 B |
+
+**Table 2 — library throughput** (`EventSourcingPerfBenchmarkTests.cs`, real Redis, no HTTP):
+
+```
+dotnet test tst/RedisEvents.EventSourcing.Tests --filter "TestType=PerfTest"
+```
+
+| Measurement | Configuration | Result |
+| --- | --- | --- |
+| Save throughput | 1 event/save | ~1,486 saves/s |
+| Save throughput | 10 events/save | ~15,365 saves/s (~154,000 events/s) |
+| Load throughput | 10-event aggregate | ~2,349 loads/s (~0.043 ms/event) |
+| Load throughput | 1000-event aggregate | ~112 loads/s (~0.009 ms/event) |
+| Save → projected view latency | 20 samples, p50 / p90 / max | 3.2 ms / 5.2 ms / 14.4 ms |
+
+**Table 3 — real service, over HTTP** (`InventoryServicePerfTests.cs`; both microservices hosted for
+real, real Redis, no in-process shortcuts):
+
+```
+dotnet test tst/RedisEvents.EventSourcing.Sample.Tests --filter "TestType=PerfTest"
+```
+
+| Measurement | Configuration | Result |
+| --- | --- | --- |
+| Write throughput | `POST /items`, command-side service | ~765 req/s |
+| Read throughput | `GET /items/{id}`, view-side service | ~2,543 req/s |
+| Create → view latency | `POST /items` → first `GET /items/{id}` 200, 20 samples, p50 / p90 / max | 1.4 ms / 2.6 ms / 15.3 ms |
+
+The takeaway is where the cost actually sits. `Save_one_event`'s own per-call overhead is under a
+microsecond and allocation-light (Table 1), so the ~1,486 saves/s ceiling in Table 2 is almost
+entirely the real Redis round trip, not this package's own bookkeeping — the same shape core's own
+[Performance](../../README.md#performance) numbers show for `XADD`. The write path barely changes
+shape once it's behind real HTTP either (~765 req/s in Table 3 vs. ~1,486 saves/s in Table 2 is the
+ASP.NET Core request pipeline and JSON binding on top of the same underlying save, not a new
+bottleneck). The read path is *faster* over HTTP than the write path, because `GET /items/{id}` is
+one Redis hash read behind a thin endpoint, with no aggregate replay and no `XADD` involved. The one
+number that genuinely changes character is create-to-view latency: a p50 in the low single-digit
+milliseconds with an occasional double-digit-millisecond tail (both in Table 2's in-process form and
+Table 3's real-HTTP form) — that tail is the real `EventProjector` consumer's own read-loop
+scheduling (it polls and batches rather than pushing synchronously the instant `SaveAsync` returns),
+not the write or the extra HTTP hop; a caller that polls a view expecting it to reflect a write it
+just made should expect that shape, not a flat constant.
