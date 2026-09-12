@@ -32,6 +32,7 @@
     <ProjectReference Include="..\..\src\RedisEvents\RedisEvents.csproj" />
     <!-- R-11: StreamAdminEndpoints lives in the Web library after the R-25 headless split. -->
     <ProjectReference Include="..\..\src\RedisEvents.Web\RedisEvents.Web.csproj" />
+    <ProjectReference Include="..\..\src\RedisEvents.MessagePack\RedisEvents.MessagePack.csproj" />
   </ItemGroup>
 
 

@@ -65,6 +65,10 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   partition or a lagging trim is observable rather than silent.
 - **Zero required configuration.** `builder.AddStream<OrderHandler>("orders")` is a complete,
   working consumer; every setting has a sane default and is only overridden when you need to.
+- **MessagePack, as an opt-in package.** [`RedisEvents.MessagePack`](src/RedisEvents.MessagePack/README.md)
+  adds the same typed publish/consume convenience over MessagePack instead of JSON, with size-gated
+  LZ4 compression — a message over 1024 bytes compresses automatically, decoding needs no
+  special-casing either way, and the threshold (or auto-compression itself) is configurable.
 
 ## Quickstart
 
@@ -257,8 +261,9 @@ topic's streams they effectively are one.
 
 ```
 src/
-  RedisEvents/       core library — producers, consumers, positions, outbox, admin, wire format
-  RedisEvents.Web/   ASP.NET Core health check + admin minimal-API endpoints
+  RedisEvents/             core library — producers, consumers, positions, outbox, admin, wire format
+  RedisEvents.Web/         ASP.NET Core health check + admin minimal-API endpoints
+  RedisEvents.MessagePack/ MessagePack-typed publish/consume, with size-gated LZ4 compression
 tst/
   RedisEvents.UnitTests/  fast, no-infrastructure unit tests (run in CI on every push)
   RedisEvents.Tests/      integration tests against a real Redis via Testcontainers

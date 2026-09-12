@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/RedisEvents/RedisEvents.csproj" />
     <Project Path="src/RedisEvents.Web/RedisEvents.Web.csproj" />
+    <Project Path="src/RedisEvents.MessagePack/RedisEvents.MessagePack.csproj" />
   </Folder>
   <Folder Name="/tst/">
     <Project Path="tst/RedisEvents.UnitTests/RedisEvents.UnitTests.csproj" />

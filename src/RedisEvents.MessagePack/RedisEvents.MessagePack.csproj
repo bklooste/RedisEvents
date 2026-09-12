@@ -1,0 +1,38 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  A separate package, deliberately: MessagePack (MessagePack-CSharp) is a real dependency core
+	  must not carry, the same reasoning that already split ASP.NET Core out into RedisEvents.Web.
+	  Reference this only if you want MessagePack-typed publish/consume; the core byte-oriented API
+	  needs no serializer at all.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>MessagePack-typed publish/consume for RedisEvents, with size-gated LZ4 compression, kept separate so the core package carries no MessagePack dependency.</Description>
+		<PackageTags>redis;redis-streams;messaging;messagepack;serialization</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="MessagePack" Version="3.1.8" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+	</ItemGroup>
+
+</Project>

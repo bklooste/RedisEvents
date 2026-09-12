@@ -428,6 +428,11 @@ batch stays a plain loop. Either way, a deserialisation failure surfaces as an o
 the handler call, subject to the same `ErrorPolicy` as any other failure — there is nothing special
 about a malformed body versus a bug in your own handler logic.
 
+`AddStream<THandler, TMessage>` also has a `Func<ReadOnlyMemory<byte>, TMessage?>`-based overload
+underneath the `JsonTypeInfo<TMessage>` one shown above — the serialisation-format-agnostic seam a
+non-JSON format plugs into, with zero access to this library's internals needed.
+[`RedisEvents.MessagePack`](../RedisEvents.MessagePack/README.md) is the one that already exists.
+
 ---
 
 ## The outbox

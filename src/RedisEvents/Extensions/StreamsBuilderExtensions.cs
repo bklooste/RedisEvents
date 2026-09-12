@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -249,15 +250,43 @@ public static class StreamsBuilderExtensions
         JsonTypeInfo<TMessage> typeInfo)
         where THandler : class
     {
+        ArgumentNullException.ThrowIfNull(typeInfo);
+        return builder.AddStream<THandler, TMessage>(topic, body => JsonSerializer.Deserialize(body.Span, typeInfo));
+    }
+
+    /// <summary>
+    /// Zero-config typed registration, generalised over any serialisation format: consume
+    /// <paramref name="topic"/> with <typeparamref name="THandler"/>, deserialising each body with
+    /// <paramref name="deserialize"/> before the handler is called. This is the seam a
+    /// non-JSON format (MessagePack, protobuf, ...) plugs into — the <see cref="JsonTypeInfo{T}"/>
+    /// overload above is a thin wrapper over this one.
+    /// </summary>
+    /// <typeparam name="THandler">
+    /// The handler class; registered as a singleton. Must implement
+    /// <see cref="IBatchHandler{TMessage}"/> or <see cref="IMessageHandler{TMessage}"/>.
+    /// </typeparam>
+    /// <typeparam name="TMessage">The deserialised message type.</typeparam>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="topic">The topic to consume.</param>
+    /// <param name="deserialize">Turns one message body into <typeparamref name="TMessage"/>.</param>
+    /// <returns>The builder, for chaining.</returns>
+    public static IHostApplicationBuilder AddStream<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler,
+        TMessage>(
+        this IHostApplicationBuilder builder,
+        string topic,
+        Func<ReadOnlyMemory<byte>, TMessage?> deserialize)
+        where THandler : class
+    {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
-        ArgumentNullException.ThrowIfNull(typeInfo);
+        ArgumentNullException.ThrowIfNull(deserialize);
 
         var options = Core(builder);
         var consumer = FindByTopic(options, topic) ?? new ConsumerOptions { Topic = topic };
 
         builder.Services.AddSingleton<THandler>();
-        return Register(builder, options, consumer, typeof(THandler), handler: null, BuildTypedWrapper<TMessage>(typeInfo));
+        return Register(builder, options, consumer, typeof(THandler), handler: null, BuildTypedWrapper(deserialize));
     }
 
     /// <summary>
@@ -278,8 +307,21 @@ public static class StreamsBuilderExtensions
         JsonTypeInfo<TMessage> typeInfo)
         where THandler : class
     {
-        ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(typeInfo);
+        return builder.AddStream<THandler, TMessage>(body => JsonSerializer.Deserialize(body.Span, typeInfo));
+    }
+
+    /// <inheritdoc cref="AddStream{THandler, TMessage}(IHostApplicationBuilder, string, Func{ReadOnlyMemory{byte}, TMessage})"/>
+    /// <exception cref="StreamConfigurationException">Thrown when there is not exactly one configured consumer.</exception>
+    public static IHostApplicationBuilder AddStream<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler,
+        TMessage>(
+        this IHostApplicationBuilder builder,
+        Func<ReadOnlyMemory<byte>, TMessage?> deserialize)
+        where THandler : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(deserialize);
 
         var options = Core(builder);
 
@@ -288,11 +330,11 @@ public static class StreamsBuilderExtensions
             throw new StreamConfigurationException(
                 $"AddStream<{typeof(THandler).Name}, {typeof(TMessage).Name}>() takes the topic from the single " +
                 $"{StreamConfigBinder.SectionName}:Consumers entry, but {options.Consumers.Length} are configured. " +
-                $"Use AddStream<{typeof(THandler).Name}, {typeof(TMessage).Name}>(topic, typeInfo) or the index overload.");
+                $"Use AddStream<{typeof(THandler).Name}, {typeof(TMessage).Name}>(topic, ...) or the index overload.");
         }
 
         builder.Services.AddSingleton<THandler>();
-        return Register(builder, options, options.Consumers[0], typeof(THandler), handler: null, BuildTypedWrapper<TMessage>(typeInfo));
+        return Register(builder, options, options.Consumers[0], typeof(THandler), handler: null, BuildTypedWrapper(deserialize));
     }
 
     /// <summary>
@@ -314,8 +356,23 @@ public static class StreamsBuilderExtensions
         JsonTypeInfo<TMessage> typeInfo)
         where THandler : class
     {
-        ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(typeInfo);
+        return builder.AddStream<THandler, TMessage>(index, body => JsonSerializer.Deserialize(body.Span, typeInfo));
+    }
+
+    /// <inheritdoc cref="AddStream{THandler, TMessage}(IHostApplicationBuilder, string, Func{ReadOnlyMemory{byte}, TMessage})"/>
+    /// <param name="index">Zero-based index into <c>Streams:Consumers</c>.</param>
+    /// <exception cref="StreamConfigurationException">Thrown when <paramref name="index"/> is out of range.</exception>
+    public static IHostApplicationBuilder AddStream<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler,
+        TMessage>(
+        this IHostApplicationBuilder builder,
+        int index,
+        Func<ReadOnlyMemory<byte>, TMessage?> deserialize)
+        where THandler : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(deserialize);
 
         var options = Core(builder);
 
@@ -328,7 +385,7 @@ public static class StreamsBuilderExtensions
         }
 
         builder.Services.AddSingleton<THandler>();
-        return Register(builder, options, options.Consumers[index], typeof(THandler), handler: null, BuildTypedWrapper<TMessage>(typeInfo));
+        return Register(builder, options, options.Consumers[index], typeof(THandler), handler: null, BuildTypedWrapper(deserialize));
     }
 
     /// <summary>
@@ -351,9 +408,24 @@ public static class StreamsBuilderExtensions
         JsonTypeInfo<TMessage> typeInfo)
         where THandler : class
     {
+        ArgumentNullException.ThrowIfNull(typeInfo);
+        return builder.AddStream<THandler, TMessage>(configure, body => JsonSerializer.Deserialize(body.Span, typeInfo));
+    }
+
+    /// <inheritdoc cref="AddStream{THandler, TMessage}(IHostApplicationBuilder, string, Func{ReadOnlyMemory{byte}, TMessage})"/>
+    /// <param name="configure">Produces the effective consumer options.</param>
+    /// <exception cref="StreamConfigurationException">Thrown when the produced options name no topic.</exception>
+    public static IHostApplicationBuilder AddStream<
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler,
+        TMessage>(
+        this IHostApplicationBuilder builder,
+        Func<ConsumerOptions, ConsumerOptions> configure,
+        Func<ReadOnlyMemory<byte>, TMessage?> deserialize)
+        where THandler : class
+    {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
-        ArgumentNullException.ThrowIfNull(typeInfo);
+        ArgumentNullException.ThrowIfNull(deserialize);
 
         var options = Core(builder);
         var seed = options.Consumers.Length == 1 ? options.Consumers[0] : new ConsumerOptions();
@@ -370,7 +442,7 @@ public static class StreamsBuilderExtensions
         }
 
         builder.Services.AddSingleton<THandler>();
-        return Register(builder, options, consumer, typeof(THandler), handler: null, BuildTypedWrapper<TMessage>(typeInfo));
+        return Register(builder, options, consumer, typeof(THandler), handler: null, BuildTypedWrapper(deserialize));
     }
 
     /// <summary>
@@ -379,13 +451,14 @@ public static class StreamsBuilderExtensions
     /// <see cref="StreamConsumerRegistration.WrapAsTypedHandler"/>. Generic only in
     /// <typeparamref name="TMessage"/>: the instance's own runtime type is what the <c>switch</c>
     /// pattern-matches against, so it works for any handler class implementing
-    /// <see cref="IBatchHandler{TMessage}"/> or <see cref="IMessageHandler{TMessage}"/>.
+    /// <see cref="IBatchHandler{TMessage}"/> or <see cref="IMessageHandler{TMessage}"/>, regardless of
+    /// serialisation format.
     /// </summary>
-    private static Func<object, object> BuildTypedWrapper<TMessage>(JsonTypeInfo<TMessage> typeInfo) =>
+    private static Func<object, object> BuildTypedWrapper<TMessage>(Func<ReadOnlyMemory<byte>, TMessage?> deserialize) =>
         instance => instance switch
         {
-            IBatchHandler<TMessage> batch => new TypedBatchHandlerAdapter<TMessage>(batch, typeInfo),
-            IMessageHandler<TMessage> message => new TypedMessageHandlerAdapter<TMessage>(message, typeInfo),
+            IBatchHandler<TMessage> batch => new TypedBatchHandlerAdapter<TMessage>(batch, deserialize),
+            IMessageHandler<TMessage> message => new TypedMessageHandlerAdapter<TMessage>(message, deserialize),
             _ => throw new StreamConfigurationException(
                 $"{instance.GetType().Name} implements neither IBatchHandler<{typeof(TMessage).Name}> " +
                 $"nor IMessageHandler<{typeof(TMessage).Name}>."),
