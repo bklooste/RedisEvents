@@ -38,11 +38,33 @@ builder.AddStreamPublisher("orders");
 await publisher.PublishAsync(orderId, order, MessagePackSerializerOptions.Standard, ct: ct);
 ```
 
-The same `PublishAsync<T>`/`PublishBatchAsync<T>` overloads exist, plus `EnqueueAsync<T>` on
-`IStreamBufferedPublisher` — the same three-method shape as the JSON typed convenience in core, and
-the same `IMessageHandler<T>`/`IBatchHandler<T>` interfaces, registered the same way via
-`AddStream<THandler, TMessage>`. `Deserialize<T>` exists too, for a handler that wants to call it by
-hand inside an untyped `IBatchHandler`/`IMessageHandler` rather than using the typed interfaces.
+`PublishBatchAsync<T>` exists too, plus `EnqueueAsync<T>` on `IStreamBufferedPublisher` — the same
+three-method shape as the JSON typed convenience in core.
+
+## Calling `Deserialize<T>` directly
+
+`IBatchHandler<T>`/`IMessageHandler<T>` above are the recommended path — a handler that only ever
+wants `T` shouldn't have to call a deserialiser itself. `Deserialize<T>` is the lower-level piece they
+are built on, and it is still there directly for a handler that already implements the *untyped*
+`IBatchHandler`/`IMessageHandler` — one that filters on `StreamMsg.Type` itself before deciding how to
+decode a message, say, or a topic multiplexing more than one message type:
+
+```csharp
+public sealed class OrderBatchHandler : IBatchHandler
+{
+    public ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    {
+        var orders = batch.Deserialize<Order>(MessagePackSerializerOptions.Standard);
+        for (var i = 0; i < orders.Length; i++)
+        {
+            Order? order = orders[i];
+            // ... handle it
+        }
+
+        return ValueTask.CompletedTask;
+    }
+}
+```
 
 ## Compression
 
