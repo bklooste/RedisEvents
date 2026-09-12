@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+	<!--
+	  The read side of the two-service worked example: a minimal ASP.NET Core host running the
+	  event projector and exposing one query endpoint over the resulting view. Not published as a
+	  package — it is a runnable sample, exercised by tst/RedisEvents.EventSourcing.Sample.Tests, not
+	  shipped to NuGet.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<IsPackable>false</IsPackable>
+		<IsPublishable>false</IsPublishable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\RedisEvents.EventSourcing\RedisEvents.EventSourcing.csproj" />
+		<ProjectReference Include="..\RedisEvents.EventSourcing.Sample.Inventory\RedisEvents.EventSourcing.Sample.Inventory.csproj" />
+	</ItemGroup>
+
+</Project>

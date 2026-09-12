@@ -11,7 +11,13 @@ own beyond what `AddEventStore`/`AddEventProjector` wire into your host.
 
 A full worked example — events, an aggregate, a projection, wired end to end — lives in
 [`samples/RedisEvents.EventSourcing.Sample.Inventory`](../../samples/RedisEvents.EventSourcing.Sample.Inventory);
-the snippets below are lifted directly from it.
+the snippets below are lifted directly from it. Two minimal, separately-runnable ASP.NET Core
+services built on top of it — a command-side API
+([`.CommandApi`](../../samples/RedisEvents.EventSourcing.Sample.Inventory.CommandApi)) and a
+read-side API ([`.ViewApi`](../../samples/RedisEvents.EventSourcing.Sample.Inventory.ViewApi)) —
+show the same example as two real, independently deployable microservices; both are exercised
+together, over real HTTP and a real Redis, by
+[`tst/RedisEvents.EventSourcing.Sample.Tests`](../../tst/RedisEvents.EventSourcing.Sample.Tests).
 
 ## Quickstart
 

@@ -15,10 +15,12 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<!-- Both test projects use this sample as their event-sourcing fixtures, including its
-		     internal InventoryEventTypes.Register and InventoryJsonContext. -->
-		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
-		<InternalsVisibleTo Include="RedisEvents.Tests" />
+		<!-- RedisEvents.EventSourcing.Tests uses this sample as its event-sourcing fixtures, including its
+		     internal InventoryEventTypes.Register and InventoryJsonContext. The two runnable services below
+		     need the same two internals to wire AddEventStore/AddEventProjector/AddRedisViewStore. -->
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Tests" />
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Sample.Inventory.CommandApi" />
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Sample.Inventory.ViewApi" />
 	</ItemGroup>
 
 </Project>
