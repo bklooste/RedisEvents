@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 
 using RedisEvents.Consumer;
+using RedisEvents.EventSourcing.Diagnostics;
 using RedisEvents.Wire;
 
 namespace RedisEvents.EventSourcing;
@@ -124,11 +125,30 @@ public sealed class EventProjector : IBatchHandler
                 Id: msg.Id,
                 CorrelationId: msg.CorrelationId);
 
-            // No try/catch by design — see the type's <remarks>. Whatever a binder throws propagates
-            // out of HandleAsync immediately and unchanged; the rest of the batch is not processed.
-            foreach (var (projection, binder) in bound)
+            // One span covers dispatch to every projection bound to this event — several may bind to
+            // the same wire type, and they run as one unit of work, the same way core reports one
+            // streams.process span per batch rather than one per message. It naturally nests under
+            // whatever streams.process span core already started for the batch: HandleAsync runs as
+            // one continuous async call chain with no reader/processor split to work around, unlike
+            // core's consumer side, so plain ActivitySource.StartActivity is correct here.
+            using var activity = EventSourcingSpans.StartProject(msg.Type, meta.AggregateId, meta.Version);
+
+            // No try/catch by design — see the type's <remarks> — except the one below, which exists
+            // solely to record the failure on the span. It changes nothing about the error contract:
+            // the exact same exception, with its original stack, still propagates out of HandleAsync
+            // immediately and unchanged, and the rest of the batch is still not processed. Disposing
+            // the (possibly null) activity happens via the enclosing `using`, on every exit path.
+            try
             {
-                await binder(@event, projection, meta, ct).ConfigureAwait(false);
+                foreach (var (projection, binder) in bound)
+                {
+                    await binder(@event, projection, meta, ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                EventSourcingSpans.Failed(activity, ex);
+                throw;
             }
         }
     }

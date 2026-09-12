@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 
+using RedisEvents.EventSourcing.Diagnostics;
 using RedisEvents.Producer;
 using RedisEvents.Wire;
 
@@ -113,49 +114,61 @@ public sealed class RedisEventRepository : IEventRepository
         var aggregate = new TAggregate();
         var name = StreamName(aggregate.AggregateName, id);
 
+        using var activity = EventSourcingSpans.StartLoad(aggregate.AggregateName, id);
+
         List<object>? history = null;
         var after = StreamId.Min;
 
-        while (true)
+        try
         {
-            var page = await this.store.ReadAsync(name, after, LoadPageSize, ct).ConfigureAwait(false);
-            if (page.Count == 0)
+            while (true)
             {
-                break;
-            }
-
-            history ??= new List<object>(page.Count);
-
-            foreach (var message in page)
-            {
-                if (!this.registry.TryDecode(message.Type, message.Body, out var @event))
+                var page = await this.store.ReadAsync(name, after, LoadPageSize, ct).ConfigureAwait(false);
+                if (page.Count == 0)
                 {
-                    throw new InvalidOperationException(
-                        $"'{aggregate.AggregateName}' '{id}' has an event of wire type '{message.Type}' at " +
-                        $"{message.Id.Format()} in its history, which is not registered with the " +
-                        $"{nameof(EventTypeRegistry)}. An aggregate's own history must be fully understood; " +
-                        "register the type (or a shim that reads it) rather than skipping the event.");
+                    break;
                 }
 
-                history.Add(@event);
-            }
+                history ??= new List<object>(page.Count);
 
-            after = page[^1].Id;
+                foreach (var message in page)
+                {
+                    if (!this.registry.TryDecode(message.Type, message.Body, out var @event))
+                    {
+                        throw new InvalidOperationException(
+                            $"'{aggregate.AggregateName}' '{id}' has an event of wire type '{message.Type}' at " +
+                            $"{message.Id.Format()} in its history, which is not registered with the " +
+                            $"{nameof(EventTypeRegistry)}. An aggregate's own history must be fully understood; " +
+                            "register the type (or a shim that reads it) rather than skipping the event.");
+                    }
 
-            // A short page is the end of the stream. The reference implementation's single capped
-            // read is what this loop exists to replace.
-            if (page.Count < LoadPageSize)
-            {
-                break;
+                    history.Add(@event);
+                }
+
+                after = page[^1].Id;
+
+                // A short page is the end of the stream. The reference implementation's single capped
+                // read is what this loop exists to replace.
+                if (page.Count < LoadPageSize)
+                {
+                    break;
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            EventSourcingSpans.Failed(activity, ex);
+            throw;
         }
 
         if (history is null)
         {
+            EventSourcingSpans.Loaded(activity, version: null);
             return null;
         }
 
         aggregate.LoadFromHistory(history);
+        EventSourcingSpans.Loaded(activity, aggregate.Version);
         return aggregate;
     }
 
@@ -179,6 +192,8 @@ public sealed class RedisEventRepository : IEventRepository
         var expected = expectedVersion ?? aggregate.Version;
         var name = StreamName(aggregate.AggregateName, aggregate.Id);
 
+        using var activity = EventSourcingSpans.StartSave(aggregate.AggregateName, aggregate.Id, expected);
+
         var events = new StateEvent[uncommitted.Count];
         for (var i = 0; i < events.Length; i++)
         {
@@ -186,25 +201,38 @@ public sealed class RedisEventRepository : IEventRepository
             events[i] = new StateEvent(body, wireType, WithEventHeaders(options, expected + i + 1));
         }
 
-        var ids = await this.store
-            .AppendAndPublishAsync(name, expected, aggregate.Id, events, ct)
-            .ConfigureAwait(false);
+        StreamId[]? ids;
+        try
+        {
+            ids = await this.store
+                .AppendAndPublishAsync(name, expected, aggregate.Id, events, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            EventSourcingSpans.Failed(activity, ex);
+            throw;
+        }
 
         if (ids is null)
         {
             // Nothing was written — neither the history nor the topic — so the aggregate keeps its
-            // uncommitted changes and the caller can reload, re-decide and try again.
+            // uncommitted changes and the caller can reload, re-decide and try again. This is an
+            // expected, caller-recoverable outcome, not a failure, so it gets its own span marker.
             this.log?.LogDebug(
                 "Event sourcing: save of '{AggregateName}' '{Id}' at expected version {ExpectedVersion} lost its version check; nothing was written.",
                 aggregate.AggregateName,
                 aggregate.Id,
                 expected);
 
+            EventSourcingSpans.ConcurrencyConflict(activity);
             throw new ConcurrencyException(aggregate.AggregateName, aggregate.Id, expected);
         }
 
         aggregate.MarkChangesAsCommitted();
-        return expected + events.Length;
+        var newVersion = expected + events.Length;
+        EventSourcingSpans.Saved(activity, newVersion, events.Length);
+        return newVersion;
     }
 
     /// <summary>

@@ -22,8 +22,14 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
-		<InternalsVisibleTo Include="RedisEvents.Tests" />
+		<!-- Same version core pins; used directly by EventSourcingOpenTelemetryExtensions rather than
+		     relying on the transitive reference through RedisEvents. -->
+		<PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Tests" />
 	</ItemGroup>
 
 </Project>
