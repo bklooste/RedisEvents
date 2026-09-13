@@ -149,6 +149,29 @@ automatically, with no registration beyond implementing the interface.
 That's the whole quickstart: events + a JSON context, one aggregate class, one projection class, and
 seven lines of `builder.Add...` wiring across both sides. No `IServiceCollection` ceremony.
 
+## Projecting from more than one stream
+
+A single `EventProjector`/consumer host is bound to exactly one topic — there is no multi-topic
+subscription primitive. But `AddProjection<T>` registers a projection *class*, not a
+topic-scoped instance, so calling `AddEventProjector` more than once with the same projection
+type gives you one shared instance fed by two independent consumer groups — a cross-stream
+projection built from two single-stream subscriptions:
+
+```csharp
+builder.AddEventProjector("inventory", InventoryEventTypes.Register)
+       .AddRedisViewStore<InventoryDetail>("inventory", "detail", InventoryJsonContext.Default.InventoryDetail)
+       .AddProjection<CombinedProjection>();
+
+builder.AddEventProjector("shipping", ShippingEventTypes.Register)
+       .AddProjection<CombinedProjection>();   // same instance, second stream
+```
+
+`CombinedProjection` need only implement `IProjection<TEvent>` for the event types it cares about
+from each stream; every `AddEventProjector` topic can dispatch to it as long as the wire type is
+registered on that topic and the projection implements the matching interface. `StreamMsg` carries
+no stream/topic name, so if provenance matters to the projection's logic, encode it in the wire
+type or the event payload itself rather than trying to recover it from `EventMeta`.
+
 ## How events are stored
 
 | Purpose | Key |
