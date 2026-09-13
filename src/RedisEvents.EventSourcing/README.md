@@ -204,6 +204,12 @@ topic can never disagree about what happened. Every published event carries an `
 
 ## Optimistic concurrency
 
+The check matters whenever an event is emitted from a read-decide-write step over aggregate state
+(two concurrent commands can both read the same stale state and both be allowed to commit, silently
+violating an invariant), and is safe to skip for streams that only append independent facts with no
+such decision behind them (telemetry, logs, per-key single-writer streams) — see
+`SaveWithoutConcurrencyCheckAsync` below.
+
 ```csharp
 try
 {
@@ -406,9 +412,8 @@ per-save optimistic-concurrency check once requests are actually overlapping: at
 is nothing to contend with `WATCH` against, so the two paths cost about the same; under real
 concurrency, every checked write against the *same* Redis connection pool competes with the others'
 `WATCH`/`MULTI`/`EXEC` round trips, where the unconditioned path only issues a plain transaction. This
-API is additive and opt-in — `SaveAsync`'s behavior and guarantees are unchanged — and should only be
-reached for by a caller that genuinely has no concurrent-writer problem to solve, since a lost update
-on the no-check path is silent.
+API is additive and opt-in — `SaveAsync`'s behavior and guarantees are unchanged. See
+[Optimistic concurrency](#optimistic-concurrency) above for when it's appropriate to reach for it.
 
 The takeaway is where the cost actually sits. `Save_one_event`'s own per-call overhead is under a
 microsecond and allocation-light (Table 1), so the ~1,486 saves/s ceiling in Table 2 is almost

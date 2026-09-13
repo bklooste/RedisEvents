@@ -4,7 +4,7 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
-## Unreleased
+## 2026-09-13
 
 ### Added
 
@@ -27,6 +27,12 @@ actually changed.
   `StreamsConnection.GetSharedDatabase` facade, both usable directly. See
   [`src/RedisEvents.EventSourcing/README.md`](src/RedisEvents.EventSourcing/README.md) and the worked
   example under `samples/RedisEvents.EventSourcing.Sample.Inventory/`.
+- `IEventRepository.SaveWithoutConcurrencyCheckAsync` / a matching unconditioned
+  `IStreamStore.AppendAndPublishAsync` overload: append and publish in one transaction with no `WATCH`
+  and no `ConcurrencyException`, for streams with no read-decide-write invariant to protect (see
+  "Optimistic concurrency" in the EventSourcing README for when that is and isn't the case). Wired into
+  the sample as `POST /items/no-check`, benchmarked against the checked `POST /items` path under 10
+  concurrent clients (~7,900 req/s vs ~1,400 req/s) — see the EventSourcing README's benchmark section.
 
 ## 2026-09-12
 
