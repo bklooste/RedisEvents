@@ -235,6 +235,50 @@ public sealed class RedisEventRepository : IEventRepository
         return newVersion;
     }
 
+    /// <inheritdoc />
+    public async ValueTask<int> SaveWithoutConcurrencyCheckAsync(
+        AggregateRoot aggregate,
+        PublishOptions options = default,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(aggregate);
+
+        var uncommitted = aggregate.GetUncommittedChanges();
+        if (uncommitted.Count == 0)
+        {
+            return aggregate.Version;
+        }
+
+        var expected = aggregate.Version;
+        var name = StreamName(aggregate.AggregateName, aggregate.Id);
+
+        using var activity = EventSourcingSpans.StartSave(aggregate.AggregateName, aggregate.Id, expected);
+
+        var events = new StateEvent[uncommitted.Count];
+        for (var i = 0; i < events.Length; i++)
+        {
+            var (wireType, body) = this.registry.Encode(uncommitted[i]);
+            events[i] = new StateEvent(body, wireType, WithEventHeaders(options, expected + i + 1));
+        }
+
+        try
+        {
+            _ = await this.store
+                .AppendAndPublishAsync(name, aggregate.Id, events, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            EventSourcingSpans.Failed(activity, ex);
+            throw;
+        }
+
+        aggregate.MarkChangesAsCommitted();
+        var newVersion = expected + events.Length;
+        EventSourcingSpans.Saved(activity, newVersion, events.Length);
+        return newVersion;
+    }
+
     /// <summary>
     /// The caller's options with this event's <c>es-version</c> and <c>es-id</c> added to — never
     /// substituted for — whatever headers they passed.

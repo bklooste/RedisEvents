@@ -258,6 +258,82 @@ internal sealed class StreamStore : IStreamStore
         return ids;
     }
 
+    /// <inheritdoc />
+    public async ValueTask<StreamId[]> AppendAndPublishAsync(
+        string name,
+        string partitionKey,
+        IReadOnlyList<StateEvent> events,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(events);
+
+        if (events.Count == 0)
+        {
+            throw new ArgumentException(
+                $"AppendAndPublishAsync was given no events for '{name}' on topic '{this.Topic}'. An append of nothing is not an " +
+                "append: there is no state change to record and nothing to announce.",
+                nameof(events));
+        }
+
+        var key = Outbox.StateKey(this.Topic, name);
+        var traceParent = CurrentTraceParent();
+
+        var publishes = new OutboxPublish[events.Count];
+        for (var i = 0; i < events.Count; i++)
+        {
+            var e = events[i];
+            if (e.Type is null)
+            {
+                throw new ArgumentException(
+                    $"AppendAndPublishAsync: event {i} for '{name}' on topic '{this.Topic}' names no type; consumers filter on it.",
+                    nameof(events));
+            }
+
+            publishes[i] = new OutboxPublish(this.Topic, partitionKey, e.Body, e.Type, e.Options, this.Options);
+        }
+
+        // Filled by the queue-only callback below, which the outbox invokes before EXEC.
+        var appended = new Task<RedisValue>?[events.Count];
+
+        // No conditions: no WATCH is issued, so this MULTI/EXEC cannot be abandoned by a lost
+        // version check — WriteAndPublishManyAsync only ever returns null when a condition fails,
+        // and there are none here, so the result is never null and there is no conflict outcome to
+        // observe for.
+        _ = await Outbox.WriteAndPublishManyAsync(
+            this.database,
+            tran =>
+            {
+                for (var i = 0; i < events.Count; i++)
+                {
+                    var e = events[i];
+
+                    appended[i] = tran.StreamAddAsync(
+                        key,
+                        EntryCodec.Encode(e.Body, e.Type, partitionKey, e.Options.CorrelationId, traceParent, e.Options.Headers),
+                        messageId: null,
+                        maxLength: null,
+                        useApproximateMaxLength: false,
+                        limit: null,
+                        trimMode: StreamTrimMode.KeepReferences,
+                        flags: CommandFlags.None);
+                }
+            },
+            publishes,
+            conditions: null,
+            stateKeys: [key],
+            ct).ConfigureAwait(false);
+
+        var ids = new StreamId[appended.Length];
+        for (var i = 0; i < appended.Length; i++)
+        {
+            var value = await appended[i]!.ConfigureAwait(false);
+            ids[i] = ParseId(value, name, i);
+        }
+
+        return ids;
+    }
+
     /// <summary>The exclusive-range form of an id: <c>(&lt;ms&gt;-&lt;seq&gt;</c>.</summary>
     private static RedisValue Exclusive(StreamId after) => "(" + after.Format();
 

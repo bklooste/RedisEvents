@@ -178,6 +178,23 @@ internal sealed class FakeStreamStore : IStreamStore
 
         return ValueTask.FromResult<StreamId[]?>(ids);
     }
+
+    /// <inheritdoc />
+    public ValueTask<StreamId[]> AppendAndPublishAsync(
+        string name,
+        string partitionKey,
+        IReadOnlyList<StateEvent> events,
+        CancellationToken ct = default)
+    {
+        var ids = new StreamId[events.Count];
+        for (var i = 0; i < events.Count; i++)
+        {
+            this.length++;
+            ids[i] = new StreamId(this.length, 0);
+        }
+
+        return ValueTask.FromResult(ids);
+    }
 }
 
 /// <summary>

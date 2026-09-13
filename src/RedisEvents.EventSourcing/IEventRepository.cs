@@ -91,4 +91,36 @@ public interface IEventRepository
         int? expectedVersion = null,
         PublishOptions options = default,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Appends the aggregate's uncommitted events to its stream and publishes them to the topic, in
+    /// one transaction, with <b>no</b> optimistic-concurrency check — no <c>WATCH</c>, no
+    /// <see cref="ConcurrencyException"/>, no chance of the save being rejected.
+    /// </summary>
+    /// <remarks>
+    /// This is <see cref="SaveAsync"/> with the version check removed and nothing else changed. Use
+    /// it only where two callers racing to save the same aggregate is not a concern — e.g. an
+    /// aggregate with a single writer, or measuring the cost of the version check itself — since a
+    /// lost update here is silent: both callers' events land, interleaved, with no error to either
+    /// one.
+    /// </remarks>
+    /// <param name="aggregate">
+    /// The aggregate to save. On success its changes are marked committed and its
+    /// <see cref="AggregateRoot.Version"/> advances.
+    /// </param>
+    /// <param name="options">
+    /// Correlation id and headers to stamp on every event, flowed through to both copies of it.
+    /// </param>
+    /// <param name="ct">Cancellation, observed before the transaction is built.</param>
+    /// <returns>
+    /// The aggregate's new version. An aggregate with nothing uncommitted returns its current version
+    /// without touching Redis at all.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// An uncommitted event's CLR type is not registered with the <see cref="EventTypeRegistry"/>.
+    /// </exception>
+    ValueTask<int> SaveWithoutConcurrencyCheckAsync(
+        AggregateRoot aggregate,
+        PublishOptions options = default,
+        CancellationToken ct = default);
 }

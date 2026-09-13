@@ -376,6 +376,40 @@ dotnet test tst/RedisEvents.EventSourcing.Sample.Tests --filter "TestType=PerfTe
 | Read throughput | `GET /items/{id}`, view-side service | ~2,543 req/s |
 | Create → view latency | `POST /items` → first `GET /items/{id}` 200, 20 samples, p50 / p90 / max | 1.4 ms / 2.6 ms / 15.3 ms |
 
+**A note on what "throughput" means above.** Every number in Table 3 so far — and the ~1,486 saves/s
+and ~2,349 loads/s in Table 2 — comes from a single `HttpClient`/connection firing requests one at a
+time in a sequential loop. That is concurrency 1: it is really a latency measurement (round trips per
+second = 1 / round-trip time), not the service's throughput ceiling under load. Table 4 below repeats
+the write and read measurements with 10 concurrent clients, which is what actually exercises request
+pipelining, connection-pool parallelism and Redis's own ability to serve overlapping commands.
+
+**Table 4 — real service, 10 concurrent clients** (`InventoryServicePerfTests.cs`, same real
+services and real Redis as Table 3):
+
+```
+dotnet test tst/RedisEvents.EventSourcing.Sample.Tests --filter "FullyQualifiedName~concurrent_clients"
+```
+
+| Measurement | Configuration | Result |
+| --- | --- | --- |
+| Write throughput, concurrency-checked | `POST /items` (optimistic-concurrency `SaveAsync`), 10 concurrent clients | ~1,400 req/s |
+| Write throughput, no concurrency check | `POST /items/no-check` (`SaveWithoutConcurrencyCheckAsync`, no `WATCH`), 10 concurrent clients | ~7,900 req/s |
+| Read throughput | `GET /items/{id}`, view-side service, 10 concurrent clients | ~13,500 req/s |
+
+`POST /items/no-check` is a benchmark-only twin of `POST /items` added specifically for this
+comparison: same load → decide → save shape, but through the new
+`IEventRepository.SaveWithoutConcurrencyCheckAsync` / `IStreamStore.AppendAndPublishAsync(name,
+partitionKey, events, ct)` overload, which appends and publishes in one `MULTI`/`EXEC` exactly like
+the checked path but with no `WATCH` and no version comparison — it always applies, and never throws
+`ConcurrencyException`. The ~5.5x gap between the two under 10 concurrent clients is the cost of the
+per-save optimistic-concurrency check once requests are actually overlapping: at concurrency 1 there
+is nothing to contend with `WATCH` against, so the two paths cost about the same; under real
+concurrency, every checked write against the *same* Redis connection pool competes with the others'
+`WATCH`/`MULTI`/`EXEC` round trips, where the unconditioned path only issues a plain transaction. This
+API is additive and opt-in — `SaveAsync`'s behavior and guarantees are unchanged — and should only be
+reached for by a caller that genuinely has no concurrent-writer problem to solve, since a lost update
+on the no-check path is silent.
+
 The takeaway is where the cost actually sits. `Save_one_event`'s own per-call overhead is under a
 microsecond and allocation-light (Table 1), so the ~1,486 saves/s ceiling in Table 2 is almost
 entirely the real Redis round trip, not this package's own bookkeeping — the same shape core's own

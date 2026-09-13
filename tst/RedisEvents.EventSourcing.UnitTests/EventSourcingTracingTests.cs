@@ -347,6 +347,20 @@ public class EventSourcingTracingTests
 
             return ValueTask.FromResult(this.AppendResult);
         }
+
+        public ValueTask<StreamId[]> AppendAndPublishAsync(
+            string name,
+            string partitionKey,
+            IReadOnlyList<StateEvent> events,
+            CancellationToken ct = default)
+        {
+            if (this.ThrowOnAppend is not null)
+            {
+                throw this.ThrowOnAppend;
+            }
+
+            return ValueTask.FromResult(this.AppendResult ?? []);
+        }
     }
 
     /// <summary>

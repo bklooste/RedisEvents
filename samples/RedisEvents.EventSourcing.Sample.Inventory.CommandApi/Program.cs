@@ -18,6 +18,16 @@ app.MapPost("/items", async (CreateItemRequest req, IEventRepository repo, Cance
     return Results.Created($"/items/{item.Id}", new { item.Id, version });
 });
 
+// Benchmark-only twin of POST /items: same load -> decide -> save shape, but through
+// SaveWithoutConcurrencyCheckAsync, so a throughput comparison isolates the cost of the WATCH-based
+// version check itself rather than anything else about the request.
+app.MapPost("/items/no-check", async (CreateItemRequest req, IEventRepository repo, CancellationToken ct) =>
+{
+    var item = InventoryItem.Create(req.Id, req.Name);
+    var version = await repo.SaveWithoutConcurrencyCheckAsync(item, ct: ct);
+    return Results.Created($"/items/{item.Id}", new { item.Id, version });
+});
+
 app.MapPost("/items/{id}/rename", async (string id, RenameItemRequest req, IEventRepository repo, CancellationToken ct) =>
 {
     var item = await repo.LoadAsync<InventoryItem>(id, ct);

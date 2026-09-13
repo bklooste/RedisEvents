@@ -123,4 +123,37 @@ public interface IStreamStore
         string partitionKey,
         IReadOnlyList<StateEvent> events,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// One <c>MULTI</c>/<c>EXEC</c>: appends every event to the named state stream and publishes
+    /// every event to the topic, both in the order given, with <b>no</b> optimistic-concurrency
+    /// check — no <c>WATCH</c>, no length comparison, no chance of a lost-condition <see
+    /// langword="null"/> return.
+    /// </summary>
+    /// <remarks>
+    /// This is <see cref="AppendAndPublishAsync(string, long, string, IReadOnlyList{StateEvent}, CancellationToken)"/>
+    /// with the version check removed and nothing else changed: same keys, same transaction shape,
+    /// same wire format. It exists for callers that do not need per-aggregate conflict detection —
+    /// e.g. a single-writer aggregate, or a benchmark isolating the cost of the <c>WATCH</c> round
+    /// trip itself — and must not be reached for by a caller that does, since two concurrent callers
+    /// can silently interleave their appends with no error and no way to tell afterwards.
+    /// </remarks>
+    /// <param name="name">The state stream's name, as in <see cref="ReadAsync"/>.</param>
+    /// <param name="partitionKey">
+    /// The routing key for the topic publishes, and the key stamped on both copies of every event.
+    /// </param>
+    /// <param name="events">
+    /// The events, appended and published in this order. Must not be empty: a transaction that
+    /// publishes nothing is not an append.
+    /// </param>
+    /// <param name="ct">Cancellation, observed before the transaction is built. Once <c>EXEC</c> is on the wire there is nothing left to cancel.</param>
+    /// <returns>The ids Redis assigned to the <b>state-stream</b> entries, in event order.</returns>
+    /// <exception cref="ArgumentException"><paramref name="name"/> is blank, <paramref name="events"/> is empty, or an event names no type.</exception>
+    /// <exception cref="StreamConfigurationException">The topic's partitions are not co-located, or its options are unusable.</exception>
+    /// <exception cref="StreamTransportException">Redis rejected or failed the transaction.</exception>
+    ValueTask<StreamId[]> AppendAndPublishAsync(
+        string name,
+        string partitionKey,
+        IReadOnlyList<StateEvent> events,
+        CancellationToken ct = default);
 }
