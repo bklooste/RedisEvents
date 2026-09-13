@@ -4,6 +4,42 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-13 (2)
+
+### Added
+
+- **`RedisEvents.EventSourcing`: register a projection as a delegate, not just a class.**
+  `AddProjection<TEvent>(Func<IServiceProvider, TEvent, EventMeta, CancellationToken, ValueTask>)` lets
+  a handler be an inline closure — resolve whatever it needs (an `IViewStore<TView>`, a repository)
+  from the `IServiceProvider` handed to it, with no `IProjection<TEvent>` class to define just to
+  satisfy the interface. `AddProjection<TEvent, TView>(Func<TEvent, EventMeta, TView>)` goes one step
+  further for the common set-semantics case: map the event to a view and it is written through
+  `IViewStore<TView>.SetAsync(meta.PartitionKey, ...)` for you. Both compose with everything else
+  unchanged — `AddEventProjector`, `AddRedisViewStore`, and class-based `AddProjection<TProjection>`
+  projections all dispatch through the same `EventProjector`, in any mix.
+
+### Changed — breaking
+
+- **`RedisEvents.EventSourcing`'s read side no longer depends on an aggregate at all.**
+  `EventProjector` previously required every event to carry an `es-version` header — stamped only by
+  this package's own `AddEventStore`/`IEventRepository.SaveAsync` — and threw `InvalidOperationException`
+  on any message missing one. That made the projector unusable against a topic published by an ordinary
+  `IStreamPublisher.PublishAsync` call, which is most topics: the read side should depend only on
+  standard RedisEvents streams and the partitioning they already guarantee, not on how the write side
+  happened to publish.
+  - `EventMeta.Version` (`int`) is removed. `EventMeta.AggregateId` is renamed to `PartitionKey` — it
+    was always just the wire message's own partition key, with no assumption an aggregate exists.
+  - Use `EventMeta.Id` (`RedisEvents.Wire.StreamId`, already present, `IComparable<StreamId>`) for the
+    same redelivery/idempotency guard `Version` was used for: Redis's own per-partition stream entry id
+    is unique, strictly increasing, and identical on every redelivery — exactly what an accumulative
+    projection needs, and it requires nothing from the producer.
+  - `EventProjector` no longer reads or requires the `es-version` header. `IEventRepository.SaveAsync`
+    still stamps it on every published event (informational only, for a human reading the raw stream) —
+    the write side is unchanged.
+  - Migration for an existing projection: replace `meta.AggregateId` with `meta.PartitionKey`, and
+    replace a `current.Version >= meta.Version` guard with `current.LastEventId >= meta.Id` (or whatever
+    field name a view chooses for the last-applied `StreamId`).
+
 ## 2026-09-13
 
 ### Added

@@ -22,8 +22,11 @@ namespace RedisEvents.EventSourcing;
 /// A projection is invoked at least once per event and must be idempotent: core's delivery is
 /// at-least-once, so a batch can be redelivered after a crash between a view being written and the
 /// consumer's position being saved. Set-semantics writes (replace the whole view) are idempotent for
-/// free; a counter or append should compare <see cref="EventMeta.Version"/> against a version stored
-/// on the view and skip when it is not greater.
+/// free; a counter or append should compare <see cref="EventMeta.Id"/> — Redis's own comparable,
+/// monotonic, per-partition stream entry id, identical on every redelivery — against the id stored on
+/// the view and skip when it is not greater. No aggregate version is needed for this: the topic's own
+/// per-partition ordering already gives every event for one key a well-defined, gap-free sequence to
+/// compare against.
 /// </para>
 /// </remarks>
 /// <typeparam name="TEvent">The event type this projection handles.</typeparam>

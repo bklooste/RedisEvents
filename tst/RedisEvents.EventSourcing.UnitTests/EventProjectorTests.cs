@@ -12,8 +12,9 @@ namespace RedisEvents.UnitTests.EventSourcing;
 /// Covers <see cref="EventProjector"/>'s dispatch rules: decoding via <see cref="EventTypeRegistry"/>,
 /// fan-out to every bound <see cref="IProjection{TEvent}"/> (including a class implementing it more
 /// than once, and several projection instances binding to the same event), the two silent-skip paths,
-/// the missing/unparsable <c>es-version</c> header, and — the point of the type — that it never
-/// catches an exception a projection throws.
+/// that it depends on nothing beyond a standard <see cref="StreamMsg"/> — no header is required, so a
+/// message published by something other than this package's own event store projects the same as one
+/// that was — and, the point of the type, that it never catches an exception a projection throws.
 /// </summary>
 public class EventProjectorTests
 {
@@ -28,15 +29,33 @@ public class EventProjectorTests
         var projection = new SpyProjection();
         var projector = new EventProjector(registry, [projection]);
 
-        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "corr-1", version: 3);
+        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "corr-1", id: new StreamId(1, 0));
 
         await projector.HandleAsync(new[] { msg }, CancellationToken.None);
 
         projection.ReceivedA.Should().ContainSingle().Which.Should().Be(SampleA);
-        projection.LastMeta.AggregateId.Should().Be("agg-1");
-        projection.LastMeta.Version.Should().Be(3);
+        projection.LastMeta.PartitionKey.Should().Be("agg-1");
         projection.LastMeta.CorrelationId.Should().Be("corr-1");
         projection.LastMeta.Id.Should().Be(msg.Id);
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task A_message_with_no_headers_at_all_projects_without_error()
+    {
+        // No es-version, no anything: the projector depends only on a StreamMsg's ordinary fields
+        // (Type, Body, PartitionKey, Id, CorrelationId) and nothing an event store specifically stamps
+        // — a plain publisher that never heard of AddEventStore projects exactly the same way.
+        var registry = new EventTypeRegistry().RegisterJson("event.a", EventProjectorTestsJson.Default.EventA);
+        var projection = new SpyProjection();
+        var projector = new EventProjector(registry, [projection]);
+
+        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0), headers: HeaderBlock.Empty);
+
+        var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        projection.ReceivedA.Should().ContainSingle().Which.Should().Be(SampleA);
     }
 
     [Fact]
@@ -49,8 +68,8 @@ public class EventProjectorTests
         var projection = new SpyProjection();
         var projector = new EventProjector(registry, [projection]);
 
-        var msgA = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 1);
-        var msgB = Build(SampleB, "event.b", partitionKey: "agg-1", correlationId: "c", version: 2);
+        var msgA = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
+        var msgB = Build(SampleB, "event.b", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 1));
 
         await projector.HandleAsync(new[] { msgA, msgB }, CancellationToken.None);
 
@@ -67,7 +86,7 @@ public class EventProjectorTests
         var second = new SpyProjection();
         var projector = new EventProjector(registry, [first, second]);
 
-        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 1);
+        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
 
         await projector.HandleAsync(new[] { msg }, CancellationToken.None);
 
@@ -83,7 +102,7 @@ public class EventProjectorTests
         var projection = new SpyProjection();
         var projector = new EventProjector(registry, [projection]);
 
-        var msg = Build(SampleA, "event.unknown", partitionKey: "agg-1", correlationId: "c", version: 1);
+        var msg = Build(SampleA, "event.unknown", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
 
         var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
 
@@ -102,7 +121,7 @@ public class EventProjectorTests
         var projection = new BOnlyProjection();
         var projector = new EventProjector(registry, [projection]);
 
-        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 1);
+        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
 
         var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
 
@@ -119,8 +138,8 @@ public class EventProjectorTests
         var spy = new SpyProjection();
         var projector = new EventProjector(registry, [thrower, spy]);
 
-        var first = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 1);
-        var second = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 2);
+        var first = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
+        var second = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 1));
 
         var act = async () => await projector.HandleAsync(new[] { first, second }, CancellationToken.None);
 
@@ -139,70 +158,24 @@ public class EventProjectorTests
         var thrower = new ThrowingProjection(new TestDontIgnoreException("blocked"));
         var projector = new EventProjector(registry, [thrower]);
 
-        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", version: 1);
+        var msg = Build(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", id: new StreamId(1, 0));
 
         var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
 
         await act.Should().ThrowAsync<TestDontIgnoreException>().WithMessage("blocked");
     }
 
-    [Fact]
-    [Trait("TestType", "UnitTest")]
-    public async Task Missing_es_version_header_throws_InvalidOperationException()
-    {
-        var registry = new EventTypeRegistry().RegisterJson("event.a", EventProjectorTestsJson.Default.EventA);
-        var projection = new SpyProjection();
-        var projector = new EventProjector(registry, [projection]);
-
-        var msg = BuildWithoutVersionHeader(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c");
-
-        var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
-
-        await act.Should().ThrowAsync<InvalidOperationException>();
-    }
-
-    [Fact]
-    [Trait("TestType", "UnitTest")]
-    public async Task Unparsable_es_version_header_throws_InvalidOperationException()
-    {
-        var registry = new EventTypeRegistry().RegisterJson("event.a", EventProjectorTestsJson.Default.EventA);
-        var projection = new SpyProjection();
-        var projector = new EventProjector(registry, [projection]);
-
-        var msg = BuildWithRawVersionHeader(SampleA, "event.a", partitionKey: "agg-1", correlationId: "c", rawVersion: "not-a-number");
-
-        var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
-
-        await act.Should().ThrowAsync<InvalidOperationException>();
-    }
-
-    private static StreamMsg Build<T>(T message, string wireType, string partitionKey, string correlationId, int version)
-        where T : notnull
-        => BuildWithRawVersionHeader(message, wireType, partitionKey, correlationId, version.ToString());
-
-    private static StreamMsg BuildWithRawVersionHeader<T>(T message, string wireType, string partitionKey, string correlationId, string rawVersion)
+    private static StreamMsg Build<T>(T message, string wireType, string partitionKey, string correlationId, StreamId id, HeaderBlock headers = default)
         where T : notnull
         => new(
             Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(message, ResolveTypeInfo<T>()),
             Type: wireType,
-            Id: new StreamId(1, 0),
+            Id: id,
             Partition: 0,
             PartitionKey: partitionKey,
             CorrelationId: correlationId,
             TraceParent: null,
-            Headers: HeaderBlock.Pack([new("es-version", rawVersion)]));
-
-    private static StreamMsg BuildWithoutVersionHeader<T>(T message, string wireType, string partitionKey, string correlationId)
-        where T : notnull
-        => new(
-            Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(message, ResolveTypeInfo<T>()),
-            Type: wireType,
-            Id: new StreamId(1, 0),
-            Partition: 0,
-            PartitionKey: partitionKey,
-            CorrelationId: correlationId,
-            TraceParent: null,
-            Headers: HeaderBlock.Empty);
+            Headers: headers);
 
     private static System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> ResolveTypeInfo<T>()
     {

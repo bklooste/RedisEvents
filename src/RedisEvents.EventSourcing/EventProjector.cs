@@ -1,5 +1,3 @@
-using System.Text;
-
 using Microsoft.Extensions.Logging;
 
 using RedisEvents.Consumer;
@@ -46,11 +44,18 @@ namespace RedisEvents.EventSourcing;
 /// could not parse), and that throw is left to propagate for the same no-catch reason as a
 /// projection's own exception.
 /// </para>
+/// <para>
+/// <b>Depends only on standard RedisEvents streams — nothing here assumes an aggregate.</b> This
+/// rides core's ordinary partitioned consumer (<see cref="StreamsBuilderExtensions.AddStream"/> under
+/// <see cref="EventSourcingBuilderExtensions.AddEventProjector"/>) and needs nothing beyond what any
+/// topic already provides: a wire type to look up in <see cref="EventTypeRegistry"/>, and the
+/// partition key and stream entry id every <see cref="StreamMsg"/> already carries — see
+/// <see cref="EventMeta"/>. A topic does not need an <see cref="AddEventStore"/> anywhere upstream of
+/// it for this type to project it.
+/// </para>
 /// </remarks>
 public sealed class EventProjector : IBatchHandler
 {
-    private static readonly byte[] VersionHeaderUtf8 = Encoding.UTF8.GetBytes("es-version");
-
     private readonly EventTypeRegistry types;
     private readonly IReadOnlyList<object> projections;
     private readonly ILogger? logger;
@@ -79,14 +84,6 @@ public sealed class EventProjector : IBatchHandler
     }
 
     /// <inheritdoc />
-    /// <exception cref="InvalidOperationException">
-    /// A message otherwise recognised by <paramref name="batch"/>'s wire type is missing the
-    /// <c>es-version</c> header, or its value does not parse as an integer. This header is stamped by
-    /// <c>RedisEventRepository</c> on every event it publishes, so its absence means the message was
-    /// produced by something else, or by a corrupted or incompatible codec — either way an event
-    /// sourcing consumer cannot know the event's aggregate version, which idempotent projections
-    /// depend on, so this is a loud decode-format failure rather than a silent default of <c>0</c>.
-    /// </exception>
     public async ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
     {
         for (var i = 0; i < batch.Length; i++)
@@ -120,8 +117,7 @@ public sealed class EventProjector : IBatchHandler
             }
 
             var meta = new EventMeta(
-                AggregateId: msg.PartitionKey,
-                Version: ReadVersionHeader(msg),
+                PartitionKey: msg.PartitionKey,
                 Id: msg.Id,
                 CorrelationId: msg.CorrelationId);
 
@@ -131,7 +127,7 @@ public sealed class EventProjector : IBatchHandler
             // whatever streams.process span core already started for the batch: HandleAsync runs as
             // one continuous async call chain with no reader/processor split to work around, unlike
             // core's consumer side, so plain ActivitySource.StartActivity is correct here.
-            using var activity = EventSourcingSpans.StartProject(msg.Type, meta.AggregateId, meta.Version);
+            using var activity = EventSourcingSpans.StartProject(msg.Type, meta.PartitionKey, meta.Id);
 
             // No try/catch by design — see the type's <remarks> — except the one below, which exists
             // solely to record the failure on the span. It changes nothing about the error contract:
@@ -151,20 +147,5 @@ public sealed class EventProjector : IBatchHandler
                 throw;
             }
         }
-    }
-
-    private static int ReadVersionHeader(in StreamMsg msg)
-    {
-        if (!msg.Headers.TryGetValueUtf8(VersionHeaderUtf8, out var valueUtf8) ||
-            !System.Buffers.Text.Utf8Parser.TryParse(valueUtf8, out int version, out var consumed) ||
-            consumed != valueUtf8.Length)
-        {
-            throw new InvalidOperationException(
-                $"Event of wire type '{msg.Type}' is missing a valid integer 'es-version' header; " +
-                "found " + (msg.Headers.TryGetValue("es-version", out var raw) ? $"'{raw}'" : "none") + ". " +
-                "This header is required to build EventMeta.Version.");
-        }
-
-        return version;
     }
 }

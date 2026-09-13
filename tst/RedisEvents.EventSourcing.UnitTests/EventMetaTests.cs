@@ -17,8 +17,8 @@ public class EventMetaTests
     {
         var id = new StreamId(1, 0);
 
-        var a = new EventMeta("agg-1", 3, id, "corr-1");
-        var b = new EventMeta("agg-1", 3, id, "corr-1");
+        var a = new EventMeta("agg-1", id, "corr-1");
+        var b = new EventMeta("agg-1", id, "corr-1");
 
         a.Should().Be(b);
         (a == b).Should().BeTrue();
@@ -26,12 +26,10 @@ public class EventMetaTests
 
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public void Instances_differing_by_version_are_not_equal()
+    public void Instances_differing_by_id_are_not_equal()
     {
-        var id = new StreamId(1, 0);
-
-        var a = new EventMeta("agg-1", 3, id, "corr-1");
-        var b = new EventMeta("agg-1", 4, id, "corr-1");
+        var a = new EventMeta("agg-1", new StreamId(1, 0), "corr-1");
+        var b = new EventMeta("agg-1", new StreamId(1, 1), "corr-1");
 
         a.Should().NotBe(b);
     }
@@ -42,10 +40,9 @@ public class EventMetaTests
     {
         var id = new StreamId(42, 1);
 
-        var meta = new EventMeta("agg-9", 7, id, "corr-9");
+        var meta = new EventMeta("agg-9", id, "corr-9");
 
-        meta.AggregateId.Should().Be("agg-9");
-        meta.Version.Should().Be(7);
+        meta.PartitionKey.Should().Be("agg-9");
         meta.Id.Should().Be(id);
         meta.CorrelationId.Should().Be("corr-9");
     }

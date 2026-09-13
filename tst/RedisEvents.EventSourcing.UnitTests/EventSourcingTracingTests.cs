@@ -168,8 +168,8 @@ public class EventSourcingTracingTests
         var projector = new EventProjector(registry, [projection]);
 
         var aggregateId = NewId();
-        var first = ProjectMsg(aggregateId, version: 1);
-        var second = ProjectMsg(aggregateId, version: 2);
+        var first = ProjectMsg(aggregateId, ms: 1);
+        var second = ProjectMsg(aggregateId, ms: 2);
 
         await projector.HandleAsync(new[] { first, second }, CancellationToken.None);
 
@@ -180,8 +180,8 @@ public class EventSourcingTracingTests
         spans.Should().OnlyContain(s => s.OperationName == "eventsourcing.project touched");
         spans.Should().OnlyContain(s => s.Kind == ActivityKind.Internal);
 
-        Tag(spans[0], EventSourcingSpans.VersionKey).Should().Be("1");
-        Tag(spans[1], EventSourcingSpans.VersionKey).Should().Be("2");
+        Tag(spans[0], EventSourcingSpans.StreamIdKey).Should().Be(first.Id.Format());
+        Tag(spans[1], EventSourcingSpans.StreamIdKey).Should().Be(second.Id.Format());
         spans.Should().OnlyContain(s => Tag(s, EventSourcingSpans.WireTypeKey) == "touched");
     }
 
@@ -204,8 +204,8 @@ public class EventSourcingTracingTests
         var projector = new EventProjector(registry, [thrower, spy]);
 
         var aggregateId = NewId();
-        var first = ProjectMsg(aggregateId, version: 1);
-        var second = ProjectMsg(aggregateId, version: 2);
+        var first = ProjectMsg(aggregateId, ms: 1);
+        var second = ProjectMsg(aggregateId, ms: 2);
 
         var act = async () => await projector.HandleAsync(new[] { first, second }, CancellationToken.None);
 
@@ -244,7 +244,7 @@ public class EventSourcingTracingTests
 
         var projection = new SpyProjection();
         var projector = new EventProjector(registry, [projection]);
-        var msg = ProjectMsg(id, version: 1);
+        var msg = ProjectMsg(id, ms: 1);
 
         var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
         await act.Should().NotThrowAsync();
@@ -269,16 +269,20 @@ public class EventSourcingTracingTests
         TraceParent: null,
         Headers: HeaderBlock.Empty);
 
-    /// <summary>A batch entry for <see cref="EventProjector.HandleAsync"/> — carries the <c>es-version</c> header the projector requires.</summary>
-    private static StreamMsg ProjectMsg(string aggregateId, int version) => new(
+    /// <summary>
+    /// A batch entry for <see cref="EventProjector.HandleAsync"/> — no headers at all. The projector
+    /// needs nothing beyond a <see cref="StreamMsg"/>'s ordinary fields, so a message that never went
+    /// near an event store projects exactly the same way as one that did.
+    /// </summary>
+    private static StreamMsg ProjectMsg(string aggregateId, long ms) => new(
         Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new Touched(aggregateId), TracedThingJson.Default.Touched),
         Type: "touched",
-        Id: new StreamId(version, 0),
+        Id: new StreamId(ms, 0),
         Partition: 0,
         PartitionKey: aggregateId,
         CorrelationId: string.Empty,
         TraceParent: null,
-        Headers: HeaderBlock.Pack([new("es-version", version.ToString(System.Globalization.CultureInfo.InvariantCulture))]));
+        Headers: HeaderBlock.Empty);
 
     /// <summary>A minimal event-sourced aggregate, defined here so these tests exercise the repository and nothing else.</summary>
     private sealed class TracedThing : AggregateRoot
@@ -390,13 +394,17 @@ public class EventSourcingTracingTests
             ActivitySource.AddActivityListener(this.listener);
         }
 
-        internal IEnumerable<Activity> For(string aggregateId)
+        // Save/load spans tag EventSourcingSpans.AggregateIdKey; project spans tag PartitionKeyKey
+        // instead, since EventProjector depends on nothing aggregate-specific — see EventMeta. A test
+        // scoping by one id wants both kinds of span, so this checks either tag.
+        internal IEnumerable<Activity> For(string id)
         {
             lock (this.gate)
             {
                 return this.collected
                     .Where(a =>
-                        a.GetTagItem(EventSourcingSpans.AggregateIdKey)?.ToString() == aggregateId)
+                        a.GetTagItem(EventSourcingSpans.AggregateIdKey)?.ToString() == id ||
+                        a.GetTagItem(EventSourcingSpans.PartitionKeyKey)?.ToString() == id)
                     .ToArray();
             }
         }

@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using FluentAssertions;
 
 using RedisEvents.EventSourcing.Sample.Inventory;
+using RedisEvents.Wire;
 
 namespace RedisEvents.Tests;
 
@@ -44,7 +45,7 @@ public sealed class InventoryServiceEndToEndTests(RedisStreamsFixture fixture)
             createResponse.StatusCode.Should().Be(HttpStatusCode.Created, "creating a new item must succeed");
 
             var created = await PollViewAsync(viewClient, id, d => d is { Name: "Widget", Active: true, CurrentCount: 0 });
-            created.Version.Should().Be(1);
+            (created.LastEventId > StreamId.Min).Should().BeTrue("a real stream entry id was recorded, not the empty/default marker");
 
             var renameResponse = await commandClient.PostAsJsonAsync($"/items/{id}/rename", new { NewName = "Widget v2" });
             renameResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -62,7 +63,10 @@ public sealed class InventoryServiceEndToEndTests(RedisStreamsFixture fixture)
             deactivateResponse.StatusCode.Should().Be(HttpStatusCode.OK);
             var final = await PollViewAsync(viewClient, id, d => !d.Active);
 
-            final.Should().BeEquivalentTo(new InventoryDetail(id, "Widget v2", false, 3, 5));
+            final.Should().BeEquivalentTo(
+                new InventoryDetail(id, "Widget v2", false, 3, default),
+                options => options.Excluding(d => d.LastEventId));
+            (final.LastEventId > StreamId.Min).Should().BeTrue("a real stream entry id was recorded, not the empty/default marker");
         }
         finally
         {
@@ -115,11 +119,12 @@ public sealed class InventoryServiceEndToEndTests(RedisStreamsFixture fixture)
                 "at least one of the racing renames must lose the optimistic version check and surface as HTTP 409, " +
                 "rather than corrupting the aggregate's history");
 
-            // Exactly one winner per contended version: the aggregate started at version 1 (the create),
-            // so its final version is 1 plus however many renames actually won the race.
-            var expectedFinalVersion = 1 + successes;
-
-            var final = await PollViewAsync(viewClient, id, d => d.Version == expectedFinalVersion);
+            // The view no longer mirrors the aggregate's exact version count — LastEventId is Redis's
+            // own stream entry id, not a small per-aggregate position number, precisely because the
+            // read side is decoupled from the concept of an aggregate entirely (see EventMeta). What
+            // is still provable here: the view settles on the content of one of the winning renames,
+            // never a lost or corrupted update.
+            var final = await PollViewAsync(viewClient, id, d => d.Name.StartsWith("Renamed-", StringComparison.Ordinal));
             final.Name.Should().StartWith("Renamed-", "the view must reflect one of the renames that actually won, not the pre-race name");
         }
         finally

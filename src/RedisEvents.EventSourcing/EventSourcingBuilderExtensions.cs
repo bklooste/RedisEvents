@@ -39,7 +39,7 @@ internal sealed class EventStoreTopics
     }
 }
 
-/// <summary>Every projection type registered on one builder via <see cref="EventSourcingBuilderExtensions.AddProjection{TProjection}"/>.</summary>
+/// <summary>Every projection type registered on one builder via <see cref="EventSourcingBuilderExtensions.AddProjection{TProjection}(IHostApplicationBuilder)"/>.</summary>
 internal sealed class ProjectionTypes
 {
     private readonly List<Type> types = [];
@@ -58,6 +58,39 @@ internal sealed class ProjectionTypes
 }
 
 /// <summary>
+/// Every delegate-backed projection registered on one builder via
+/// <see cref="EventSourcingBuilderExtensions.AddProjection{TEvent}(IHostApplicationBuilder, Func{IServiceProvider, TEvent, EventMeta, CancellationToken, ValueTask})"/>.
+/// Kept separate from <see cref="ProjectionTypes"/> because a delegate has no <see cref="Type"/> DI can
+/// resolve on its own — each entry is a factory that builds the <see cref="IProjection{TEvent}"/>
+/// adapter directly from a resolved <see cref="IServiceProvider"/>.
+/// </summary>
+internal sealed class ProjectionFactories
+{
+    private readonly List<Func<IServiceProvider, object>> factories = [];
+
+    /// <summary>Every factory registered so far, in registration order.</summary>
+    public IReadOnlyList<Func<IServiceProvider, object>> Factories => this.factories;
+
+    /// <summary>Records a factory. Always appended — unlike a type, a delegate has no identity to de-duplicate on.</summary>
+    public void Add(Func<IServiceProvider, object> factory) => this.factories.Add(factory);
+}
+
+/// <summary>
+/// Adapts a plain delegate to <see cref="IProjection{TEvent}"/>, so <see cref="EventTypeRegistry.TryBindProjection"/>
+/// and <see cref="EventProjector"/> dispatch to it exactly as they would to a hand-written class — see
+/// <see cref="EventSourcingBuilderExtensions.AddProjection{TEvent}(IHostApplicationBuilder, Func{IServiceProvider, TEvent, EventMeta, CancellationToken, ValueTask})"/>.
+/// </summary>
+internal sealed class DelegateProjection<TEvent>(
+    IServiceProvider services,
+    Func<IServiceProvider, TEvent, EventMeta, CancellationToken, ValueTask> handler)
+    : IProjection<TEvent>
+    where TEvent : class
+{
+    public ValueTask HandleAsync(TEvent @event, EventMeta meta, CancellationToken ct) =>
+        handler(services, @event, meta, ct);
+}
+
+/// <summary>
 /// Registration API for <c>RedisEvents.EventSourcing</c>, in the same style as core's
 /// <see cref="StreamsBuilderExtensions"/>: additive, idempotent per topic, and resolved through DI at
 /// container-build time rather than at call time — so the order <c>AddEventStore</c>,
@@ -69,6 +102,7 @@ public static class EventSourcingBuilderExtensions
     private const string EventStoreTopicsKey = "RedisEvents.EventSourcing:EventStoreTopics";
     private const string EventStoreDefaultsKey = "RedisEvents.EventSourcing:EventStoreDefaults";
     private const string ProjectionTypesKey = "RedisEvents.EventSourcing:ProjectionTypes";
+    private const string ProjectionFactoriesKey = "RedisEvents.EventSourcing:ProjectionFactories";
 
     /// <summary>
     /// Registers the command side for <paramref name="topic"/>: a state store (via
@@ -118,7 +152,8 @@ public static class EventSourcingBuilderExtensions
 
     /// <summary>
     /// Registers the read side for <paramref name="topic"/>: an <see cref="EventProjector"/>
-    /// dispatching to every <see cref="AddProjection{TProjection}"/> instance on this builder, riding
+    /// dispatching to every projection registered on this builder — class-based or delegate-based,
+    /// see the <c>AddProjection</c> overloads — riding
     /// core's ordinary consumer (<see cref="StreamsBuilderExtensions.AddStream(IHostApplicationBuilder, string, Func{ReadOnlyMemory{RedisEvents.Wire.StreamMsg}, CancellationToken, ValueTask})"/>)
     /// — so <c>Streams:Consumers</c> configuration, positions and the error contract are exactly
     /// core's, with nothing added on top.
@@ -150,8 +185,8 @@ public static class EventSourcingBuilderExtensions
     /// overload — no internals of either are touched.
     /// </para>
     /// <para>
-    /// Every <see cref="AddProjection{TProjection}"/> call on the builder is available to every
-    /// <see cref="AddEventProjector"/> topic, regardless of which was registered first or which
+    /// Every <c>AddProjection</c> call on the builder — class-based or delegate-based — is available
+    /// to every <see cref="AddEventProjector"/> topic, regardless of which was registered first or which
     /// topic a projection is "for": a projection only ever receives events whose wire type is both
     /// registered on that topic and one it implements <see cref="IProjection{TEvent}"/> for, so one
     /// meant for a different topic simply never sees anything on this one.
@@ -167,15 +202,20 @@ public static class EventSourcingBuilderExtensions
 
         EnsureEventTypeRegistry(builder, topic, events);
 
-        var projections = ProjectionTypesRegistry(builder);
+        var projectionTypes = ProjectionTypesRegistry(builder);
+        var projectionFactories = ProjectionFactoriesRegistry(builder);
 
         // The bare, non-functional registration — see the <remarks> above.
         builder.AddStream<EventProjector>(topic);
 
-        // The real one. Registered after, so it is the one actually resolved.
+        // The real one. Registered after, so it is the one actually resolved. Class-based projections
+        // (AddProjection<TProjection>) and delegate-based ones (AddProjection<TEvent>(handler)) are two
+        // separate lists on the builder — see ProjectionTypes/ProjectionFactories — combined here into
+        // the one flat list EventProjector dispatches through; it does not care which source built any
+        // given instance.
         builder.Services.AddSingleton(sp => new EventProjector(
             sp.GetRequiredKeyedService<EventTypeRegistry>(topic),
-            projections.Types.Select(sp.GetRequiredService).ToList(),
+            [.. projectionTypes.Types.Select(sp.GetRequiredService), .. projectionFactories.Factories.Select(f => f(sp))],
             sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents.EventSourcing")));
 
         return builder;
@@ -202,6 +242,70 @@ public static class EventSourcingBuilderExtensions
         ProjectionTypesRegistry(builder).Add(typeof(TProjection));
         builder.Services.AddSingleton<TProjection>();
         return builder;
+    }
+
+    /// <summary>
+    /// Registers <paramref name="handler"/> as a projection for <typeparamref name="TEvent"/>,
+    /// available to every <see cref="AddEventProjector"/> on this builder — without defining a class.
+    /// </summary>
+    /// <typeparam name="TEvent">The event type <paramref name="handler"/> handles.</typeparam>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="handler">
+    /// Called once per matching event, exactly as <see cref="IProjection{TEvent}.HandleAsync"/> would
+    /// be. <see cref="IServiceProvider"/> is resolved once, when the enclosing <see cref="EventProjector"/>
+    /// is built, and handed to every call — resolve whatever the handler needs from it, e.g.
+    /// <c>sp.GetRequiredService&lt;IViewStore&lt;TView&gt;&gt;()</c> or a service's own repository. A
+    /// closure that only needs one or two dependencies rarely justifies a whole class just to satisfy
+    /// <see cref="IProjection{TEvent}"/>; this is the seam for that case. A projection with real
+    /// per-instance state, or one binding several event types, is still better as a class registered via
+    /// <see cref="AddProjection{TProjection}(IHostApplicationBuilder)"/>.
+    /// </param>
+    /// <returns>The builder, for chaining.</returns>
+    public static IHostApplicationBuilder AddProjection<TEvent>(
+        this IHostApplicationBuilder builder,
+        Func<IServiceProvider, TEvent, EventMeta, CancellationToken, ValueTask> handler)
+        where TEvent : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(handler);
+
+        ProjectionFactoriesRegistry(builder).Add(sp => new DelegateProjection<TEvent>(sp, handler));
+        return builder;
+    }
+
+    /// <summary>
+    /// Registers a projection for <typeparamref name="TEvent"/> whose entire job is mapping the event
+    /// to a view and replacing whatever is stored for it — the common, set-semantics case (an
+    /// <c>ItemCreated</c>-style handler, in the README's terms), with the boilerplate of resolving
+    /// <see cref="IViewStore{TView}"/> and calling <see cref="IViewStore{TView}.SetAsync"/> done for you.
+    /// </summary>
+    /// <typeparam name="TEvent">The event type <paramref name="map"/> handles.</typeparam>
+    /// <typeparam name="TView">
+    /// The view type. Resolved from DI as <see cref="IViewStore{TView}"/> — register one first, e.g.
+    /// via <see cref="AddRedisViewStore{TView}"/> or <c>services.AddSingleton&lt;IViewStore&lt;TView&gt;&gt;(...)</c>.
+    /// </typeparam>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="map">Builds the replacement view from the event and its envelope.</param>
+    /// <returns>The builder, for chaining.</returns>
+    /// <remarks>
+    /// The view is stored under <see cref="EventMeta.PartitionKey"/> — the common case, since a topic
+    /// is partitioned by the same key a view is naturally looked up by. <c>SetAsync</c> is idempotent
+    /// under at-least-once redelivery on its own (see <see cref="IViewStore{TView}"/>), so this needs no
+    /// <see cref="EventMeta.Id"/> guard — which is exactly why it fits this shorthand. A handler that
+    /// must read the current view first (an accumulating count, a conditional update, a different id
+    /// than the partition key) needs the general delegate overload of <c>AddProjection</c>, or a class,
+    /// instead.
+    /// </remarks>
+    public static IHostApplicationBuilder AddProjection<TEvent, TView>(
+        this IHostApplicationBuilder builder,
+        Func<TEvent, EventMeta, TView> map)
+        where TEvent : class
+        where TView : class
+    {
+        ArgumentNullException.ThrowIfNull(map);
+
+        return builder.AddProjection<TEvent>((sp, @event, meta, ct) =>
+            sp.GetRequiredService<IViewStore<TView>>().SetAsync(meta.PartitionKey, map(@event, meta), ct));
     }
 
     /// <summary>
@@ -308,6 +412,18 @@ public static class EventSourcingBuilderExtensions
         registry = new ProjectionTypes();
         builder.Properties[ProjectionTypesKey] = registry;
         builder.Services.AddSingleton(registry);
+        return registry;
+    }
+
+    private static ProjectionFactories ProjectionFactoriesRegistry(IHostApplicationBuilder builder)
+    {
+        if (builder.Properties.TryGetValue(ProjectionFactoriesKey, out var existing) && existing is ProjectionFactories registry)
+        {
+            return registry;
+        }
+
+        registry = new ProjectionFactories();
+        builder.Properties[ProjectionFactoriesKey] = registry;
         return registry;
     }
 

@@ -16,20 +16,32 @@ namespace RedisEvents.EventSourcing;
 /// projections. Second, by the time a projection sees an event it has already been decoded by
 /// <see cref="EventTypeRegistry.TryDecode"/>, so there is nothing left for it to do with
 /// <c>StreamMsg.Body</c> except misuse the pooled buffer that memory aliases — <see cref="EventMeta"/>
-/// carries forward only the facts a projection actually needs (<see cref="AggregateId"/>,
-/// <see cref="Version"/>, <see cref="Id"/>, <see cref="CorrelationId"/>) and nothing that outlives
-/// the batch.
+/// carries forward only the facts a projection actually needs (<see cref="PartitionKey"/>,
+/// <see cref="Id"/>, <see cref="CorrelationId"/>) and nothing that outlives the batch.
+/// </para>
+/// <para>
+/// <b>No aggregate version here, by design.</b> The read side depends only on standard RedisEvents
+/// streams — a topic's own partitioning and per-partition ordering — not on whether the write side
+/// happens to be an <see cref="AggregateRoot"/>. Redis already assigns every entry a monotonically
+/// increasing <see cref="Id"/> within its partition, and a topic is partitioned by key, so all events
+/// for one key arrive at one projector instance in publish order for free. That is everything an
+/// idempotent projection needs: a redelivery is a replay of an already-seen contiguous prefix, never
+/// a reordering, so a running total or append-style update just needs to compare the incoming
+/// <see cref="Id"/> (it implements <see cref="IComparable{T}"/>) against the last one it applied and
+/// skip when it is not greater — no manufactured version number, and no dependency on the event
+/// having come from <see cref="AddEventStore"/> at all. A set-semantics update (replace the whole
+/// view) needs no guard either way.
 /// </para>
 /// </remarks>
-/// <param name="AggregateId">
-/// The id of the aggregate that raised the event — the wire message's <c>PartitionKey</c>, since
-/// every event of one aggregate is published with the aggregate id as its partition key.
+/// <param name="PartitionKey">
+/// The wire message's own partition key — the key every event sharing one ordered history was
+/// published under, whatever the write side that key happens to identify (an aggregate id is the
+/// common case, but this field carries no assumption that one exists).
 /// </param>
-/// <param name="Version">
-/// The event's 1-based position in its aggregate's stream, read from the <c>es-version</c> header
-/// <c>RedisEventRepository</c> stamps on every published event. Lets a projection assert
-/// per-aggregate monotonicity or skip a stale at-least-once redelivery.
+/// <param name="Id">
+/// The Redis stream entry id the event was read at: unique and strictly increasing within its
+/// partition, and identical on every redelivery of that entry. The natural ordering and dedupe key
+/// for a projection — see the remarks above.
 /// </param>
-/// <param name="Id">The Redis stream entry id the event was read at.</param>
 /// <param name="CorrelationId">The publisher's correlation id, or empty when none was set.</param>
-public readonly record struct EventMeta(string AggregateId, int Version, RedisEvents.Wire.StreamId Id, string CorrelationId);
+public readonly record struct EventMeta(string PartitionKey, RedisEvents.Wire.StreamId Id, string CorrelationId);

@@ -73,7 +73,7 @@ public sealed class EventSourcingEndToEndTests(RedisStreamsFixture fixture)
                 async () =>
                 {
                     var view = await views.GetAsync("item-1");
-                    return view is { Name: "Widget v2", CurrentCount: 3, Version: 4 };
+                    return view is { Name: "Widget v2", CurrentCount: 3 };
                 },
                 TimeSpan.FromSeconds(15),
                 "the real projector to carry every save into the real Redis view");
@@ -84,7 +84,7 @@ public sealed class EventSourcingEndToEndTests(RedisStreamsFixture fixture)
             final.Name.Should().Be("Widget v2");
             final.Active.Should().BeTrue();
             final.CurrentCount.Should().Be(3);
-            final.Version.Should().Be(4);
+            (final.LastEventId > StreamId.Min).Should().BeTrue("a real stream entry id was recorded, not the empty/default marker");
         }
         finally
         {
@@ -130,14 +130,14 @@ public sealed class EventSourcingEndToEndTests(RedisStreamsFixture fixture)
                 .Which.AggregateName.Should().Be("Inventory");
 
             await RedisStreamsFixture.WaitUntilAsync(
-                async () => (await views.GetAsync("item-2"))?.Version == 2,
+                async () => (await views.GetAsync("item-2")) is { Name: "From first" },
                 TimeSpan.FromSeconds(15),
                 "the real projector to catch up to the winning save");
 
             var view = await views.GetAsync("item-2");
             view.Should().NotBeNull();
             view!.Name.Should().Be("From first", "the losing save must never have reached the view");
-            view.Version.Should().Be(2);
+            (view.LastEventId > StreamId.Min).Should().BeTrue("a real stream entry id was recorded, not the empty/default marker");
         }
         finally
         {
@@ -217,7 +217,7 @@ public sealed class EventSourcingEndToEndTests(RedisStreamsFixture fixture)
             var views2 = host2.Services.GetRequiredService<IViewStore<InventoryDetail>>();
 
             await RedisStreamsFixture.WaitUntilAsync(
-                async () => (await views2.GetAsync("item-3"))?.Version == HistoryCheckIns + 2,
+                async () => (await views2.GetAsync("item-3"))?.CurrentCount == HistoryCheckIns + 1,
                 TimeSpan.FromSeconds(15),
                 "the second host to pick up the one new event, resuming from the stored position");
 

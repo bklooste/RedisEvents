@@ -119,19 +119,19 @@ exist" is an ordinary question, not an error path.
 **4. A projection and the read side** — one class, four lines of wiring:
 
 ```csharp
-public sealed record InventoryDetail(string Id, string Name, bool Active, int CurrentCount, int Version);
+public sealed record InventoryDetail(string Id, string Name, bool Active, int CurrentCount, StreamId LastEventId);
 
 public sealed class InventoryDetailProjection(IViewStore<InventoryDetail> views) :
     IProjection<ItemCreated>, IProjection<ItemRenamed>
 {
     public ValueTask HandleAsync(ItemCreated e, EventMeta meta, CancellationToken ct) =>
-        views.SetAsync(e.Id, new InventoryDetail(e.Id, e.Name, true, 0, meta.Version), ct);
+        views.SetAsync(e.Id, new InventoryDetail(e.Id, e.Name, true, 0, meta.Id), ct);
 
     public async ValueTask HandleAsync(ItemRenamed e, EventMeta meta, CancellationToken ct)
     {
-        var current = await views.GetAsync(meta.AggregateId, ct);
-        if (current is null || current.Version >= meta.Version) return;   // at-least-once: skip a redelivery
-        await views.SetAsync(meta.AggregateId, current with { Name = e.NewName, Version = meta.Version }, ct);
+        var current = await views.GetAsync(meta.PartitionKey, ct);
+        if (current is null || current.LastEventId >= meta.Id) return;   // at-least-once: skip a redelivery
+        await views.SetAsync(meta.PartitionKey, current with { Name = e.NewName, LastEventId = meta.Id }, ct);
     }
 }
 
@@ -142,6 +142,12 @@ builder.AddEventProjector("inventory", InventoryEventTypes.Register)
 // later, injected as IViewStore<InventoryDetail>
 var detail = await views.GetAsync(id);
 ```
+
+`meta.PartitionKey` and `meta.Id` are the wire message's own partition key and Redis stream entry id —
+nothing here assumes `ItemCreated`/`ItemRenamed` came from an `AggregateRoot`. This projector works
+identically against a topic published by a plain `IStreamPublisher.PublishAsync` call, because it
+depends on nothing beyond a standard RedisEvents topic — see [View stores](#view-stores) below for why
+`meta.Id` is the right redelivery guard either way.
 
 A class may implement `IProjection<TEvent>` for as many event types as it likes — each is bound
 automatically, with no registration beyond implementing the interface.
@@ -199,8 +205,11 @@ silently compare against the wrong number.
 
 Both writes are one transaction: a version-check failure applies neither, and a connection lost
 around `EXEC` leaves an outcome that is unknown but never torn — the aggregate's history and the
-topic can never disagree about what happened. Every published event carries an `es-version` header
-(its 1-based version) so a projection can tell a redelivery from new information.
+topic can never disagree about what happened. Every published event also carries an `es-version`
+header (its 1-based position in the aggregate's stream) purely as an informational aid for a human
+reading the raw stream — `EventProjector` does not read it, and no projection needs to: `EventMeta.Id`
+already lets a projection tell a redelivery from new information, on this topic or any other, whether
+or not its producer is this package's own event store. See [View stores](#view-stores).
 
 ## Optimistic concurrency
 
@@ -299,8 +308,13 @@ real store.
 **Consumers are at-least-once**, so a projection can be asked to handle the same event twice — after
 a crash between the view being written and the position being saved. `SetAsync` on its own is
 idempotent (writing the same value again changes nothing observable); anything accumulative (a
-running count) needs its own guard, comparing `EventMeta.Version` against a version stored on the
-view, as `InventoryDetailProjection` does above.
+running count) needs its own guard, comparing `EventMeta.Id` against the id stored on the view, as
+`InventoryDetailProjection` does above. `Id` is Redis's own stream entry id — unique and strictly
+increasing within its partition, and identical on every redelivery of that entry — not an aggregate
+version, so this guard works the same whether or not the topic's producer is this package's own
+`AddEventStore`. A topic is partitioned by key, so every event sharing one `Id`-ordered history
+already arrives at one projector instance in publish order; nothing extra is needed to make that
+comparison meaningful.
 
 ## Error handling
 

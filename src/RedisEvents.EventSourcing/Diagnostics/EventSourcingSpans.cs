@@ -1,5 +1,7 @@
 using System.Diagnostics;
 
+using RedisEvents.Wire;
+
 namespace RedisEvents.EventSourcing.Diagnostics;
 
 /// <summary>
@@ -66,6 +68,12 @@ internal static class EventSourcingSpans
 
     /// <summary>Attribute: the wire type of the event being projected.</summary>
     internal const string WireTypeKey = "eventsourcing.wire_type";
+
+    /// <summary>Attribute: the partition key an event being projected was published under.</summary>
+    internal const string PartitionKeyKey = "eventsourcing.partition_key";
+
+    /// <summary>Attribute: the Redis stream entry id an event being projected was read at.</summary>
+    internal const string StreamIdKey = "eventsourcing.stream_id";
 
     /// <summary>
     /// Starts the span for one <see cref="IEventRepository.SaveAsync"/> call.
@@ -195,15 +203,17 @@ internal static class EventSourcingSpans
     /// it, inside <see cref="EventProjector.HandleAsync"/>.
     /// </summary>
     /// <param name="wireType">The event's wire type.</param>
-    /// <param name="aggregateId">The id of the aggregate that raised the event, i.e. <see cref="EventMeta.AggregateId"/>.</param>
-    /// <param name="version">The event's 1-based position in its aggregate's history, i.e. <see cref="EventMeta.Version"/>.</param>
+    /// <param name="partitionKey">The partition key the event was published under, i.e. <see cref="EventMeta.PartitionKey"/>.</param>
+    /// <param name="id">The Redis stream entry id the event was read at, i.e. <see cref="EventMeta.Id"/>.</param>
     /// <returns>The started span, or <see langword="null"/> when nothing is listening.</returns>
     /// <remarks>
     /// One span per dispatched event, not one per bound projection: several projections may bind to
     /// the same event, and they run as one unit of work inside the batch, exactly like core reports
-    /// one <c>streams.process</c> span per batch rather than one per message.
+    /// one <c>streams.process</c> span per batch rather than one per message. Tagged with the stream's
+    /// own partition key and entry id, not an aggregate id or version — the projector depends on
+    /// nothing beyond a standard RedisEvents topic, see <see cref="EventMeta"/>.
     /// </remarks>
-    internal static Activity? StartProject(string wireType, string aggregateId, int version)
+    internal static Activity? StartProject(string wireType, string partitionKey, StreamId id)
     {
         var activity = EventSourcingDiagnostics.Source.StartActivity(
             $"{ProjectSpanName} {wireType}",
@@ -212,8 +222,8 @@ internal static class EventSourcingSpans
         if (activity is { IsAllDataRequested: true })
         {
             activity.SetTag(WireTypeKey, wireType);
-            activity.SetTag(AggregateIdKey, aggregateId);
-            activity.SetTag(VersionKey, version);
+            activity.SetTag(PartitionKeyKey, partitionKey);
+            activity.SetTag(StreamIdKey, id.Format());
         }
 
         return activity;

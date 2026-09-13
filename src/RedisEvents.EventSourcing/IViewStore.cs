@@ -18,8 +18,8 @@ namespace RedisEvents.EventSourcing;
 /// saved". Writing through <see cref="SetAsync"/> is naturally idempotent: replacing a view with the
 /// same value it already holds changes nothing observable. Anything accumulative — a running total, a
 /// counter, an append to a list — is not automatically safe and needs its own guard: store the
-/// event's <c>EventMeta.Version</c> on the view and skip the update when the incoming version is not
-/// greater than the one already recorded. Both patterns are shown in the package README.
+/// event's <c>EventMeta.Id</c> on the view and skip the update when the incoming id is not greater
+/// than the one already recorded. Both patterns are shown in the package README.
 /// </para>
 /// </remarks>
 /// <typeparam name="TView">The view model type. Must be a reference type so <c>null</c> can mean "not found".</typeparam>
@@ -27,7 +27,7 @@ public interface IViewStore<TView>
     where TView : class
 {
     /// <summary>Reads the view with the given id.</summary>
-    /// <param name="id">The view's id — typically the aggregate id it was projected from.</param>
+    /// <param name="id">The view's id — typically the partition key it was projected from.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The view, or <see langword="null"/> when no view exists for <paramref name="id"/>.</returns>
     ValueTask<TView?> GetAsync(string id, CancellationToken ct = default);
@@ -35,7 +35,7 @@ public interface IViewStore<TView>
     /// <summary>
     /// Writes (creating or replacing) the view with the given id.
     /// </summary>
-    /// <param name="id">The view's id — typically the aggregate id it was projected from.</param>
+    /// <param name="id">The view's id — typically the partition key it was projected from.</param>
     /// <param name="view">The view to store.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <remarks>
