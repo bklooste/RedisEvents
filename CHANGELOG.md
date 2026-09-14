@@ -4,6 +4,21 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-15
+
+### Added
+
+- `RedisEvents.EventSourcing.CachedAggregate<TAggregate>`: the load-decide-save-retry loop every
+  command-side write path around `IEventRepository` was hand-rolling slightly differently. Holds one
+  cached aggregate instance, never trusts it across a save whose outcome is unknown, and on a lost
+  optimistic-concurrency check reloads and re-decides — up to a caller-chosen `maxAttempts`, after
+  which the `ConcurrencyException` is left to propagate, same as calling `SaveAsync` with no retry at
+  all. `AggregateDecision<T>.Redo()` lets a decision discard the instance it was handed and try again,
+  uncounted against the retry budget, for a reason that isn't contention (a batched command that raised
+  events and then failed and must be dropped before the rest re-apply; a no-op decision made against a
+  cached copy that turned out to be stale). Deliberately not a lock, an actor, or a cache with its own
+  eviction policy — how access is serialized and how long an idle instance lives stay the caller's call.
+
 ## 2026-09-14
 
 ### Changed — breaking
