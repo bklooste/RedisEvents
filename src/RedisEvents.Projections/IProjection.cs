@@ -1,4 +1,4 @@
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// Handles one kind of domain event on the read side, updating whatever view <typeparamref name="TEvent"/>

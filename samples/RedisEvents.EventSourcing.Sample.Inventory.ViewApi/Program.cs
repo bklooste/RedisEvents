@@ -1,5 +1,5 @@
-using RedisEvents.EventSourcing;
 using RedisEvents.EventSourcing.Sample.Inventory;
+using RedisEvents.Projections;
 
 // The read side of the two-service Inventory sample: an event projector consuming the same topic
 // the command side (RedisEvents.EventSourcing.Sample.Inventory.CommandApi) writes to, a Redis-backed

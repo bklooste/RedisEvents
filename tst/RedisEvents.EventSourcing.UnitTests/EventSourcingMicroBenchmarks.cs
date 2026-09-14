@@ -12,6 +12,7 @@ using FluentAssertions;
 
 using RedisEvents.EventSourcing;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
 namespace RedisEvents.UnitTests.EventSourcing;

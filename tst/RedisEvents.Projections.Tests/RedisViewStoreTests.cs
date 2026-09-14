@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 using FluentAssertions;
 
-using RedisEvents.EventSourcing;
+using RedisEvents.Projections;
 
 namespace RedisEvents.Tests;
 

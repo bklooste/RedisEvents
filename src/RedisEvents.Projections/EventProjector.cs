@@ -1,10 +1,10 @@
 using Microsoft.Extensions.Logging;
 
 using RedisEvents.Consumer;
-using RedisEvents.EventSourcing.Diagnostics;
+using RedisEvents.Projections.Diagnostics;
 using RedisEvents.Wire;
 
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// The read side's <see cref="IBatchHandler"/>: decodes each event in a batch via an
@@ -47,11 +47,11 @@ namespace RedisEvents.EventSourcing;
 /// <para>
 /// <b>Depends only on standard RedisEvents streams — nothing here assumes an aggregate.</b> This
 /// rides core's ordinary partitioned consumer (<see cref="StreamsBuilderExtensions.AddStream"/> under
-/// <see cref="EventSourcingBuilderExtensions.AddEventProjector"/>) and needs nothing beyond what any
+/// <see cref="ProjectionsBuilderExtensions.AddEventProjector"/>) and needs nothing beyond what any
 /// topic already provides: a wire type to look up in <see cref="EventTypeRegistry"/>, and the
 /// partition key and stream entry id every <see cref="StreamMsg"/> already carries — see
-/// <see cref="EventMeta"/>. A topic does not need an <see cref="AddEventStore"/> anywhere upstream of
-/// it for this type to project it.
+/// <see cref="EventMeta"/>. A topic does not need an <c>AddEventStore</c> (in the sibling
+/// <c>RedisEvents.EventSourcing</c> package) anywhere upstream of it for this type to project it.
 /// </para>
 /// </remarks>
 public sealed class EventProjector : IBatchHandler
@@ -127,7 +127,7 @@ public sealed class EventProjector : IBatchHandler
             // whatever streams.process span core already started for the batch: HandleAsync runs as
             // one continuous async call chain with no reader/processor split to work around, unlike
             // core's consumer side, so plain ActivitySource.StartActivity is correct here.
-            using var activity = EventSourcingSpans.StartProject(msg.Type, meta.PartitionKey, meta.Id);
+            using var activity = ProjectionsSpans.StartProject(msg.Type, meta.PartitionKey, meta.Id);
 
             // No try/catch by design — see the type's <remarks> — except the one below, which exists
             // solely to record the failure on the span. It changes nothing about the error contract:
@@ -143,7 +143,7 @@ public sealed class EventProjector : IBatchHandler
             }
             catch (Exception ex)
             {
-                EventSourcingSpans.Failed(activity, ex);
+                ProjectionsSpans.Failed(activity, ex);
                 throw;
             }
         }

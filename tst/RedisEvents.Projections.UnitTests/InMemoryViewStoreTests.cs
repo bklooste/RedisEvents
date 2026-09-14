@@ -1,7 +1,7 @@
 using FluentAssertions;
-using RedisEvents.EventSourcing;
+using RedisEvents.Projections;
 
-namespace RedisEvents.UnitTests.EventSourcing;
+namespace RedisEvents.Projections.UnitTests;
 
 /// <summary>
 /// Basic get/set/delete/list round-trip behaviour of <see cref="InMemoryViewStore{TView}"/>, which

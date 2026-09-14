@@ -6,6 +6,7 @@ using FluentAssertions;
 using RedisEvents.EventSourcing;
 using RedisEvents.EventSourcing.Diagnostics;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
 namespace RedisEvents.EventSourcing.UnitTests;
@@ -13,9 +14,10 @@ namespace RedisEvents.EventSourcing.UnitTests;
 #pragma warning disable CA1852 // The JSON context has to be a partial class for the generator.
 
 /// <summary>
-/// Covers the package's own OpenTelemetry spans — <c>eventsourcing.save</c>,
-/// <c>eventsourcing.load</c> and <c>eventsourcing.project</c> — added alongside
-/// <see cref="RedisEventRepository"/> and <see cref="EventProjector"/>.
+/// Covers the package's own OpenTelemetry spans — <c>eventsourcing.save</c> and
+/// <c>eventsourcing.load</c> — added alongside <see cref="RedisEventRepository"/>. The equivalent
+/// span for a projection dispatch, <c>projections.project</c>, is covered by the sibling
+/// <c>RedisEvents.Projections</c> package's own <c>ProjectionsTracingTests</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -158,76 +160,14 @@ public class EventSourcingTracingTests
         Tag(span, EventSourcingSpans.VersionKey).Should().BeNull("nothing was found, so there is no version to report");
     }
 
-    [Fact]
-    [Trait("TestType", "UnitTest")]
-    public async Task HandleAsync_emits_one_project_span_per_dispatched_event()
-    {
-        using var rig = new SpanRig();
-        var registry = NewRegistry();
-        var projection = new SpyProjection();
-        var projector = new EventProjector(registry, [projection]);
-
-        var aggregateId = NewId();
-        var first = ProjectMsg(aggregateId, ms: 1);
-        var second = ProjectMsg(aggregateId, ms: 2);
-
-        await projector.HandleAsync(new[] { first, second }, CancellationToken.None);
-
-        projection.Received.Should().HaveCount(2);
-
-        var spans = rig.For(aggregateId).ToArray();
-        spans.Should().HaveCount(2, "one span per dispatched event, not per bound projection");
-        spans.Should().OnlyContain(s => s.OperationName == "eventsourcing.project touched");
-        spans.Should().OnlyContain(s => s.Kind == ActivityKind.Internal);
-
-        Tag(spans[0], EventSourcingSpans.StreamIdKey).Should().Be(first.Id.Format());
-        Tag(spans[1], EventSourcingSpans.StreamIdKey).Should().Be(second.Id.Format());
-        spans.Should().OnlyContain(s => Tag(s, EventSourcingSpans.WireTypeKey) == "touched");
-    }
-
-    /// <summary>
-    /// The critical regression check: adding tracing must not change
-    /// <see cref="EventProjector"/>'s error contract in any way. The exact same exception instance
-    /// must still come out of <see cref="EventProjector.HandleAsync"/>, and the rest of the batch —
-    /// including the second binder for the very event that threw — must still never run.
-    /// </summary>
-    [Fact]
-    [Trait("TestType", "UnitTest")]
-    public async Task A_throwing_projection_marks_its_span_as_an_error_and_still_propagates_the_exception_unchanged()
-    {
-        using var rig = new SpanRig();
-        var registry = NewRegistry();
-
-        var boom = new InvalidOperationException("boom");
-        var thrower = new ThrowingProjection(boom);
-        var spy = new SpyProjection();
-        var projector = new EventProjector(registry, [thrower, spy]);
-
-        var aggregateId = NewId();
-        var first = ProjectMsg(aggregateId, ms: 1);
-        var second = ProjectMsg(aggregateId, ms: 2);
-
-        var act = async () => await projector.HandleAsync(new[] { first, second }, CancellationToken.None);
-
-        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(boom);
-
-        spy.Received.Should().BeEmpty(
-            "the second binder for the first event, and the second event entirely, must never run — unchanged from before tracing existed");
-
-        var spans = rig.For(aggregateId).ToArray();
-        spans.Should().ContainSingle("only the first event's span was ever started; the throw stopped the batch before the second");
-        spans[0].Status.Should().Be(ActivityStatusCode.Error);
-        spans[0].StatusDescription.Should().Be("boom");
-    }
-
     /// <summary>
     /// With no listener registered — the default for every other test in the suite — tracing must
-    /// cost nothing observable: save, load and project all behave exactly as they did before this
-    /// package had any tracing of its own.
+    /// cost nothing observable: save and load both behave exactly as they did before this package
+    /// had any tracing of its own.
     /// </summary>
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public async Task With_no_listener_save_load_and_project_still_work()
+    public async Task With_no_listener_save_and_load_still_work()
     {
         var registry = NewRegistry();
         var id = NewId();
@@ -241,14 +181,6 @@ public class EventSourcingTracingTests
         store.ReadResult = [HistoryMsg(id, version: 1)];
         var loaded = await repo.LoadAsync<TracedThing>(id);
         loaded.Should().NotBeNull();
-
-        var projection = new SpyProjection();
-        var projector = new EventProjector(registry, [projection]);
-        var msg = ProjectMsg(id, ms: 1);
-
-        var act = async () => await projector.HandleAsync(new[] { msg }, CancellationToken.None);
-        await act.Should().NotThrowAsync();
-        projection.Received.Should().ContainSingle();
     }
 
     private static string NewId() => Guid.NewGuid().ToString("N");
@@ -263,21 +195,6 @@ public class EventSourcingTracingTests
         Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new Touched(aggregateId), TracedThingJson.Default.Touched),
         Type: "touched",
         Id: new StreamId(version, 0),
-        Partition: 0,
-        PartitionKey: aggregateId,
-        CorrelationId: string.Empty,
-        TraceParent: null,
-        Headers: HeaderBlock.Empty);
-
-    /// <summary>
-    /// A batch entry for <see cref="EventProjector.HandleAsync"/> — no headers at all. The projector
-    /// needs nothing beyond a <see cref="StreamMsg"/>'s ordinary fields, so a message that never went
-    /// near an event store projects exactly the same way as one that did.
-    /// </summary>
-    private static StreamMsg ProjectMsg(string aggregateId, long ms) => new(
-        Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new Touched(aggregateId), TracedThingJson.Default.Touched),
-        Type: "touched",
-        Id: new StreamId(ms, 0),
         Partition: 0,
         PartitionKey: aggregateId,
         CorrelationId: string.Empty,
@@ -303,22 +220,6 @@ public class EventSourcingTracingTests
             thing.Raise(new Touched(id));
             return thing;
         }
-    }
-
-    private sealed class SpyProjection : IProjection<Touched>
-    {
-        public List<Touched> Received { get; } = [];
-
-        public ValueTask HandleAsync(Touched @event, EventMeta meta, CancellationToken ct)
-        {
-            this.Received.Add(@event);
-            return ValueTask.CompletedTask;
-        }
-    }
-
-    private sealed class ThrowingProjection(Exception toThrow) : IProjection<Touched>
-    {
-        public ValueTask HandleAsync(Touched @event, EventMeta meta, CancellationToken ct) => throw toThrow;
     }
 
     /// <summary>
@@ -394,17 +295,12 @@ public class EventSourcingTracingTests
             ActivitySource.AddActivityListener(this.listener);
         }
 
-        // Save/load spans tag EventSourcingSpans.AggregateIdKey; project spans tag PartitionKeyKey
-        // instead, since EventProjector depends on nothing aggregate-specific — see EventMeta. A test
-        // scoping by one id wants both kinds of span, so this checks either tag.
         internal IEnumerable<Activity> For(string id)
         {
             lock (this.gate)
             {
                 return this.collected
-                    .Where(a =>
-                        a.GetTagItem(EventSourcingSpans.AggregateIdKey)?.ToString() == id ||
-                        a.GetTagItem(EventSourcingSpans.PartitionKeyKey)?.ToString() == id)
+                    .Where(a => a.GetTagItem(EventSourcingSpans.AggregateIdKey)?.ToString() == id)
                     .ToArray();
             }
         }

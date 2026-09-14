@@ -12,6 +12,7 @@ using Microsoft.Extensions.Hosting;
 using RedisEvents.EventSourcing;
 using RedisEvents.Errors;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 
 using StackExchange.Redis;
 

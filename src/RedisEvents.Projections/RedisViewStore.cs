@@ -4,7 +4,7 @@ using System.Text.Json.Serialization.Metadata;
 
 using StackExchange.Redis;
 
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// A Redis-backed <see cref="IViewStore{TView}"/>: one Redis HASH per view type, field = view id,

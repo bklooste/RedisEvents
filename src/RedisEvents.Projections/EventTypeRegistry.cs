@@ -3,7 +3,7 @@ using System.Text.Json.Serialization.Metadata;
 
 using RedisEvents.Errors;
 
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// Maps event CLR types to a stable wire type string and back, and owns their (de)serialisation.
@@ -15,8 +15,9 @@ namespace RedisEvents.EventSourcing;
 /// <c>ItemAdded</c>, or moving it to a different namespace, must never change what is already on the
 /// wire. Registering an explicit string (<c>"inventory.created"</c>) means a class rename is a pure
 /// refactor — replay of history recorded years earlier keeps working because the string, not the CLR
-/// name, is what <see cref="IEventRepository"/> and <see cref="EventProjector"/> key off. This mirrors
-/// why <see cref="AggregateRoot.AggregateName"/> is explicit rather than derived from the type.
+/// name, is what <c>RedisEvents.EventSourcing.IEventRepository</c> and <see cref="EventProjector"/>
+/// key off. This mirrors why an aggregate's own name is explicit rather than derived from the type
+/// (<c>RedisEvents.EventSourcing.AggregateRoot.AggregateName</c>, in the sibling package).
 /// </para>
 /// <para>
 /// <b>Pluggable serialisation.</b> <see cref="RegisterJson{TEvent}"/> covers the common,

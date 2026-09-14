@@ -1,9 +1,9 @@
 using FluentAssertions;
 
-using RedisEvents.EventSourcing;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
-namespace RedisEvents.UnitTests.EventSourcing;
+namespace RedisEvents.Projections.UnitTests;
 
 /// <summary>
 /// Trivial value-equality coverage for <see cref="EventMeta"/> — it is a plain record struct with no

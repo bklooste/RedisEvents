@@ -4,9 +4,9 @@ using System.Text.Json.Serialization;
 using FluentAssertions;
 
 using RedisEvents.Errors;
-using RedisEvents.EventSourcing;
+using RedisEvents.Projections;
 
-namespace RedisEvents.UnitTests.EventSourcing;
+namespace RedisEvents.Projections.UnitTests;
 
 /// <summary>
 /// Covers <see cref="EventTypeRegistry"/>: the JSON and hand rolled serialiser seams, duplicate

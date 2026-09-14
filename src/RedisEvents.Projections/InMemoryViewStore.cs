@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// An in-process <see cref="IViewStore{TView}"/> backed by a <see cref="ConcurrentDictionary{TKey,TValue}"/>.

@@ -1,13 +1,19 @@
 # RedisEvents.EventSourcing
 
-A light event-sourced aggregate root (command side) and a typed event projector (read side) on top
-of [RedisEvents](../RedisEvents/README.md). It rides the same partitioned topics, positions and
-error contract core already provides — this package adds only what an event store needs beyond
-that: an aggregate's own stream as its source of truth, optimistic concurrency, and reflection-free
-dispatch on both sides.
+A light event-sourced aggregate root (command side) on top of
+[RedisEvents](../RedisEvents/README.md). It rides the same partitioned topics, positions and error
+contract core already provides — this package adds only what an event store needs beyond that: an
+aggregate's own stream as its source of truth, optimistic concurrency, and reflection-free dispatch.
+
+**The read side lives in the sibling [`RedisEvents.Projections`](../RedisEvents.Projections/README.md)
+package** — `AddEventProjector`, `IProjection<TEvent>`, `IViewStore<TView>`. This package depends on
+it (for `EventTypeRegistry`, shared so an aggregate's stream and its projections never disagree on
+wire format), but that dependency runs one way: `RedisEvents.Projections` has no idea an aggregate
+exists, and a service that only wants typed projections over an ordinary topic can reference just
+that package.
 
 **This is a library, not a service.** It has no ASP.NET Core dependency and starts nothing on its
-own beyond what `AddEventStore`/`AddEventProjector` wire into your host.
+own beyond what `AddEventStore` wires into your host.
 
 A full worked example — events, an aggregate, a projection, wired end to end — lives in
 [`samples/RedisEvents.EventSourcing.Sample.Inventory`](../../samples/RedisEvents.EventSourcing.Sample.Inventory);
@@ -116,67 +122,25 @@ await repository.SaveAsync(item);   // expectedVersion defaults to item.Version
 `LoadAsync` returns `null` — not an exception — when the id has no history; "does this aggregate
 exist" is an ordinary question, not an error path.
 
-**4. A projection and the read side** — one class, four lines of wiring:
+**4. The read side** — a projection reading the same topic `AddEventStore` publishes to, using the
+sibling `RedisEvents.Projections` package:
 
 ```csharp
-public sealed record InventoryDetail(string Id, string Name, bool Active, int CurrentCount, StreamId LastEventId);
-
-public sealed class InventoryDetailProjection(IViewStore<InventoryDetail> views) :
-    IProjection<ItemCreated>, IProjection<ItemRenamed>
-{
-    public ValueTask HandleAsync(ItemCreated e, EventMeta meta, CancellationToken ct) =>
-        views.SetAsync(e.Id, new InventoryDetail(e.Id, e.Name, true, 0, meta.Id), ct);
-
-    public async ValueTask HandleAsync(ItemRenamed e, EventMeta meta, CancellationToken ct)
-    {
-        var current = await views.GetAsync(meta.PartitionKey, ct);
-        if (current is null || current.LastEventId >= meta.Id) return;   // at-least-once: skip a redelivery
-        await views.SetAsync(meta.PartitionKey, current with { Name = e.NewName, LastEventId = meta.Id }, ct);
-    }
-}
-
 builder.AddEventProjector("inventory", InventoryEventTypes.Register)
        .AddRedisViewStore<InventoryDetail>("inventory", "detail", InventoryJsonContext.Default.InventoryDetail)
        .AddProjection<InventoryDetailProjection>();
-
-// later, injected as IViewStore<InventoryDetail>
-var detail = await views.GetAsync(id);
 ```
 
-`meta.PartitionKey` and `meta.Id` are the wire message's own partition key and Redis stream entry id —
-nothing here assumes `ItemCreated`/`ItemRenamed` came from an `AggregateRoot`. This projector works
-identically against a topic published by a plain `IStreamPublisher.PublishAsync` call, because it
-depends on nothing beyond a standard RedisEvents topic — see [View stores](#view-stores) below for why
-`meta.Id` is the right redelivery guard either way.
+`AddEventProjector`'s `events` argument can be omitted here — step 3's `AddEventStore` call already
+registered `InventoryEventTypes.Register` for this topic, and the two share one `EventTypeRegistry`.
+See that package's own [Quickstart](../RedisEvents.Projections/README.md#quickstart) for
+`InventoryDetailProjection`'s definition and everything else about the read side: registering a
+projection without a class, projecting from more than one stream, view stores, and the error
+contract.
 
-A class may implement `IProjection<TEvent>` for as many event types as it likes — each is bound
-automatically, with no registration beyond implementing the interface.
-
-That's the whole quickstart: events + a JSON context, one aggregate class, one projection class, and
-seven lines of `builder.Add...` wiring across both sides. No `IServiceCollection` ceremony.
-
-## Projecting from more than one stream
-
-A single `EventProjector`/consumer host is bound to exactly one topic — there is no multi-topic
-subscription primitive. But `AddProjection<T>` registers a projection *class*, not a
-topic-scoped instance, so calling `AddEventProjector` more than once with the same projection
-type gives you one shared instance fed by two independent consumer groups — a cross-stream
-projection built from two single-stream subscriptions:
-
-```csharp
-builder.AddEventProjector("inventory", InventoryEventTypes.Register)
-       .AddRedisViewStore<InventoryDetail>("inventory", "detail", InventoryJsonContext.Default.InventoryDetail)
-       .AddProjection<CombinedProjection>();
-
-builder.AddEventProjector("shipping", ShippingEventTypes.Register)
-       .AddProjection<CombinedProjection>();   // same instance, second stream
-```
-
-`CombinedProjection` need only implement `IProjection<TEvent>` for the event types it cares about
-from each stream; every `AddEventProjector` topic can dispatch to it as long as the wire type is
-registered on that topic and the projection implements the matching interface. `StreamMsg` carries
-no stream/topic name, so if provenance matters to the projection's logic, encode it in the wire
-type or the event payload itself rather than trying to recover it from `EventMeta`.
+That's the whole quickstart: events + a JSON context, one aggregate class, and three lines of
+`builder.Add...` wiring — plus whatever the read side needs from the sibling package. No
+`IServiceCollection` ceremony either side.
 
 ## How events are stored
 
@@ -254,77 +218,14 @@ for (var attempt = 0; ; attempt++)
 `RegisterJson` covers the default, AOT-safe path via a source-generated `JsonTypeInfo<T>`. The wire
 type string is chosen once and never derived from `.FullName` or `.Name` — a class rename is then a
 pure refactor, because it is the string, not the CLR name, that a stream of history already written
-is keyed on.
+is keyed on. `Register` (a raw serialise/deserialise pair, for MessagePack or anything else that
+isn't JSON) and everything else about `EventTypeRegistry` is documented in the sibling package's
+[Serialisation section](../RedisEvents.Projections/README.md#serialisation-and-the-event-type-registry) —
+`EventTypeRegistry` itself lives there, shared by both packages for a topic that uses both.
 
-For anything else — MessagePack, a hand-rolled binary format — `Register` takes a raw serialise/
-deserialise pair, adding no package dependency:
-
-```csharp
-events.Register<ItemCreated>(
-    "inventory.created",
-    e => MessagePackSerializer.Serialize(e, options),
-    b => MessagePackSerializer.Deserialize<ItemCreated>(b, options));
-```
-
-This mirrors the same `Func<ReadOnlyMemory<byte>, TMessage?>` seam
-[`RedisEvents.MessagePack`](../RedisEvents.MessagePack/README.md) plugs into core through, so its
-size-gated LZ4 compression options can be passed straight through as `options`.
-
-## View stores
-
-`IViewStore<TView>` is an optional convenience, not a requirement — a projection may write anywhere
-it likes. `AddRedisViewStore<TView>` stores one Redis **hash per view type** (`{topic}:view:<name>`,
-field = view id, value = JSON), which is fine for up to tens of thousands of small views. Beyond
-that, or for any query other than "by id" or "all", implement `IViewStore<TView>` yourself — for
-example over Azure Table Storage:
-
-```csharp
-public sealed class TableViewStore<TView>(TableClient table, JsonTypeInfo<TView> json) : IViewStore<TView>
-    where TView : class
-{
-    public async ValueTask<TView?> GetAsync(string id, CancellationToken ct = default)
-    {
-        try
-        {
-            var entity = await table.GetEntityAsync<TableEntity>("view", id, cancellationToken: ct);
-            return JsonSerializer.Deserialize(entity.Value.GetString("Json"), json);
-        }
-        catch (RequestFailedException ex) when (ex.Status == 404)
-        {
-            return null;
-        }
-    }
-
-    public Task SetAsync(string id, TView view, CancellationToken ct = default) =>
-        table.UpsertEntityAsync(new TableEntity("view", id) { ["Json"] = JsonSerializer.Serialize(view, json) }, cancellationToken: ct).AsTask();
-
-    // DeleteAsync, ListAsync: DeleteEntityAsync / QueryAsync<TableEntity>(e => e.PartitionKey == "view").
-}
-```
-
-`InMemoryViewStore<TView>` is provided for tests and for trying a projection out before wiring up a
-real store.
-
-**Consumers are at-least-once**, so a projection can be asked to handle the same event twice — after
-a crash between the view being written and the position being saved. `SetAsync` on its own is
-idempotent (writing the same value again changes nothing observable); anything accumulative (a
-running count) needs its own guard, comparing `EventMeta.Id` against the id stored on the view, as
-`InventoryDetailProjection` does above. `Id` is Redis's own stream entry id — unique and strictly
-increasing within its partition, and identical on every redelivery of that entry — not an aggregate
-version, so this guard works the same whether or not the topic's producer is this package's own
-`AddEventStore`. A topic is partitioned by key, so every event sharing one `Id`-ordered history
-already arrives at one projector instance in publish order; nothing extra is needed to make that
-comparison meaningful.
-
-## Error handling
-
-The projector has no error policy of its own; it has core's. Per event, in batch order: an unknown
-wire type or a known type with no projection bound to it is skipped at `Debug`; a decode failure
-always throws; a projection that throws propagates unchanged and immediately, and the rest of the
-batch is not processed. From there it is exactly
-[core's error contract](../RedisEvents/README.md#the-error-contract): an ordinary exception logs the
-batch and advances past it, and a `DontIgnoreException` subclass blocks the partition and retries
-with backoff while every other partition keeps running.
+View stores and the projector's error handling are also the sibling package's concern — see its
+[View stores](../RedisEvents.Projections/README.md#view-stores) and
+[Error handling](../RedisEvents.Projections/README.md#error-handling) sections.
 
 ## Limits
 

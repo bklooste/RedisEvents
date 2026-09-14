@@ -1,3 +1,5 @@
+using RedisEvents.Projections;
+
 namespace RedisEvents.EventSourcing.Sample.Inventory;
 
 /// <summary>

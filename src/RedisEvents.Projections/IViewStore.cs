@@ -1,4 +1,4 @@
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// An optional read-side seam for projections: get, set, delete and list a view by id.

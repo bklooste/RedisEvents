@@ -4,6 +4,7 @@
     <Project Path="src/RedisEvents.Web/RedisEvents.Web.csproj" />
     <Project Path="src/RedisEvents.MessagePack/RedisEvents.MessagePack.csproj" />
     <Project Path="src/RedisEvents.EventSourcing/RedisEvents.EventSourcing.csproj" />
+    <Project Path="src/RedisEvents.Projections/RedisEvents.Projections.csproj" />
   </Folder>
   <Folder Name="/tst/">
     <Project Path="tst/RedisEvents.UnitTests/RedisEvents.UnitTests.csproj" />
@@ -11,6 +12,8 @@
     <Project Path="tst/RedisEvents.EventSourcing.UnitTests/RedisEvents.EventSourcing.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.EventSourcing.Tests/RedisEvents.EventSourcing.Tests.csproj" />
     <Project Path="tst/RedisEvents.EventSourcing.Sample.Tests/RedisEvents.EventSourcing.Sample.Tests.csproj" />
+    <Project Path="tst/RedisEvents.Projections.UnitTests/RedisEvents.Projections.UnitTests.csproj" />
+    <Project Path="tst/RedisEvents.Projections.Tests/RedisEvents.Projections.Tests.csproj" />
     <Project Path="tst/RedisEvents.MessagePack.UnitTests/RedisEvents.MessagePack.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.TestSupport/RedisEvents.TestSupport.csproj" />
   </Folder>

@@ -1,4 +1,5 @@
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 
 namespace RedisEvents.EventSourcing;
 

@@ -6,6 +6,7 @@ using FluentAssertions;
 using RedisEvents.Config;
 using RedisEvents.EventSourcing;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
 using StackExchange.Redis;

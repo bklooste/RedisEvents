@@ -1,3 +1,5 @@
+using RedisEvents.Projections;
+
 namespace RedisEvents.EventSourcing.Sample.Inventory;
 
 /// <summary>Registers every inventory event's wire type, for both the command side and the read side to share.</summary>

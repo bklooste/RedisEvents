@@ -1,0 +1,35 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  Typed event projections and view stores over standard RedisEvents streams: usable entirely on
+	  its own, with no event-sourced write side. The sibling RedisEvents.EventSourcing package (event
+	  sourced aggregates, per-aggregate streams) depends on this one for EventTypeRegistry, so the two
+	  share one registry per topic when a service uses both; this package never depends back.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>Typed event projections and view stores over RedisEvents streams: reflection-free dispatch to IProjection&lt;TEvent&gt; handlers and a Redis-backed IViewStore&lt;TView&gt;, usable against any standard topic with no event-sourced write side required.</Description>
+		<PackageTags>redis;redis-streams;projections;cqrs;views</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.Projections.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.Projections.Tests" />
+	</ItemGroup>
+
+</Project>

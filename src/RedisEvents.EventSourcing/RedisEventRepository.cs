@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 
 using RedisEvents.EventSourcing.Diagnostics;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
 namespace RedisEvents.EventSourcing;

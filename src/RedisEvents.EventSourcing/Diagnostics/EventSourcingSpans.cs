@@ -1,13 +1,13 @@
 using System.Diagnostics;
 
-using RedisEvents.Wire;
-
 namespace RedisEvents.EventSourcing.Diagnostics;
 
 /// <summary>
-/// The package's own spans — <c>eventsourcing.save {aggregate}</c>,
-/// <c>eventsourcing.load {aggregate}</c> and <c>eventsourcing.project {wireType}</c> — and the
-/// attribute names they share.
+/// The package's own spans — <c>eventsourcing.save {aggregate}</c> and
+/// <c>eventsourcing.load {aggregate}</c> — and the attribute names they share. The equivalent span
+/// for a projection dispatch, <c>projections.project {wireType}</c>, lives in the sibling
+/// <c>RedisEvents.Projections</c> package's own <c>ProjectionsSpans</c> — this package depends on
+/// that one, not the other way round, so the read-side span cannot live here.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -19,15 +19,11 @@ namespace RedisEvents.EventSourcing.Diagnostics;
 /// nothing beyond its own construction — the same discipline as core's <c>StreamSpans</c>.
 /// </para>
 /// <para>
-/// <b>Save and load versus project.</b> <see cref="StartSave"/> and <see cref="StartLoad"/> run on
+/// <b>Save and load.</b> <see cref="StartSave"/> and <see cref="StartLoad"/> run on
 /// the caller's own execution context — a repository call is a plain request/response over one
 /// Redis round trip, not a message hop with a decoupled reader — so <see cref="Activity.Current"/>
 /// is genuinely the right parent and no traceparent rebuilding is needed, unlike core's consumer
-/// side. <see cref="StartProject"/> is the same story for a projection dispatch: <c>HandleAsync</c>
-/// runs as one continuous async call chain from wherever core's partition worker invoked it, with
-/// no reader/processor split, so a plain <see cref="ActivitySource.StartActivity(string, ActivityKind)"/>
-/// with no explicit parent or links naturally nests under whatever <c>streams.process</c> span core
-/// already started for the batch.
+/// side.
 /// </para>
 /// <para>
 /// <b>Conflict versus failure.</b> A <see cref="ConcurrencyException"/> is an expected,
@@ -44,9 +40,6 @@ internal static class EventSourcingSpans
 
     /// <summary>Span name prefix for a load; the aggregate name is appended.</summary>
     private const string LoadSpanName = "eventsourcing.load";
-
-    /// <summary>Span name prefix for one event's projection dispatch; the wire type is appended.</summary>
-    private const string ProjectSpanName = "eventsourcing.project";
 
     /// <summary>Attribute: the aggregate family, i.e. <see cref="AggregateRoot.AggregateName"/>.</summary>
     internal const string AggregateNameKey = "eventsourcing.aggregate";
@@ -65,15 +58,6 @@ internal static class EventSourcingSpans
 
     /// <summary>Attribute: whether a load found an existing aggregate.</summary>
     internal const string FoundKey = "eventsourcing.found";
-
-    /// <summary>Attribute: the wire type of the event being projected.</summary>
-    internal const string WireTypeKey = "eventsourcing.wire_type";
-
-    /// <summary>Attribute: the partition key an event being projected was published under.</summary>
-    internal const string PartitionKeyKey = "eventsourcing.partition_key";
-
-    /// <summary>Attribute: the Redis stream entry id an event being projected was read at.</summary>
-    internal const string StreamIdKey = "eventsourcing.stream_id";
 
     /// <summary>
     /// Starts the span for one <see cref="IEventRepository.SaveAsync"/> call.
@@ -196,36 +180,5 @@ internal static class EventSourcingSpans
             activity.SetTag(FoundKey, true);
             activity.SetTag(VersionKey, version.Value);
         }
-    }
-
-    /// <summary>
-    /// Starts the span for one event's dispatch to every <see cref="IProjection{TEvent}"/> bound to
-    /// it, inside <see cref="EventProjector.HandleAsync"/>.
-    /// </summary>
-    /// <param name="wireType">The event's wire type.</param>
-    /// <param name="partitionKey">The partition key the event was published under, i.e. <see cref="EventMeta.PartitionKey"/>.</param>
-    /// <param name="id">The Redis stream entry id the event was read at, i.e. <see cref="EventMeta.Id"/>.</param>
-    /// <returns>The started span, or <see langword="null"/> when nothing is listening.</returns>
-    /// <remarks>
-    /// One span per dispatched event, not one per bound projection: several projections may bind to
-    /// the same event, and they run as one unit of work inside the batch, exactly like core reports
-    /// one <c>streams.process</c> span per batch rather than one per message. Tagged with the stream's
-    /// own partition key and entry id, not an aggregate id or version — the projector depends on
-    /// nothing beyond a standard RedisEvents topic, see <see cref="EventMeta"/>.
-    /// </remarks>
-    internal static Activity? StartProject(string wireType, string partitionKey, StreamId id)
-    {
-        var activity = EventSourcingDiagnostics.Source.StartActivity(
-            $"{ProjectSpanName} {wireType}",
-            ActivityKind.Internal);
-
-        if (activity is { IsAllDataRequested: true })
-        {
-            activity.SetTag(WireTypeKey, wireType);
-            activity.SetTag(PartitionKeyKey, partitionKey);
-            activity.SetTag(StreamIdKey, id.Format());
-        }
-
-        return activity;
     }
 }

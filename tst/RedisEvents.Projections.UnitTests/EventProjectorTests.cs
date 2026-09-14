@@ -3,10 +3,10 @@ using System.Text.Json.Serialization;
 using FluentAssertions;
 
 using RedisEvents.Errors;
-using RedisEvents.EventSourcing;
+using RedisEvents.Projections;
 using RedisEvents.Wire;
 
-namespace RedisEvents.UnitTests.EventSourcing;
+namespace RedisEvents.Projections.UnitTests;
 
 /// <summary>
 /// Covers <see cref="EventProjector"/>'s dispatch rules: decoding via <see cref="EventTypeRegistry"/>,

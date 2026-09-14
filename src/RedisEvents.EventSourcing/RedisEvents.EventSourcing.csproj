@@ -8,8 +8,8 @@
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 		<IsAotCompatible>true</IsAotCompatible>
-		<Description>Event-sourced aggregates and typed projections over RedisEvents: per-aggregate Redis streams as the source of truth, optimistic concurrency, and reflection-free event dispatch.</Description>
-		<PackageTags>redis;redis-streams;event-sourcing;cqrs;projections</PackageTags>
+		<Description>Event-sourced aggregates over RedisEvents: per-aggregate Redis streams as the source of truth, optimistic concurrency, and reflection-free event dispatch. Typed projections/view stores live in the sibling RedisEvents.Projections package, usable independently of this one.</Description>
+		<PackageTags>redis;redis-streams;event-sourcing;cqrs</PackageTags>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
 
@@ -19,6 +19,11 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+		<!-- For EventTypeRegistry: the write side and the read side (RedisEvents.Projections) share
+		     one registry per topic, so an aggregate's events and its projections never disagree on
+		     wire format. This is the one-way dependency: Projections does not reference this
+		     package, so it stays usable with no event-sourced write side at all. -->
+		<ProjectReference Include="../RedisEvents.Projections/RedisEvents.Projections.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

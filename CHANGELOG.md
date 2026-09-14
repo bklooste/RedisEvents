@@ -4,6 +4,27 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-14
+
+### Changed — breaking
+
+- **The read side of `RedisEvents.EventSourcing` is now its own package, `RedisEvents.Projections`.**
+  `EventProjector`, `IProjection<TEvent>`, `EventMeta`, `EventTypeRegistry`, `IViewStore<TView>`,
+  `InMemoryViewStore<TView>`, `RedisViewStore<TView>`, and the `AddEventProjector`/`AddProjection`/
+  `AddRedisViewStore` registration API all moved to `RedisEvents.Projections`. This is the natural
+  conclusion of yesterday's change decoupling the projector from any aggregate concept: it already
+  depended on nothing but a standard RedisEvents topic, so it no longer needs to ship inside the
+  event-sourcing package at all. `RedisEvents.EventSourcing` now depends on `RedisEvents.Projections`
+  (for the shared `EventTypeRegistry`, so `AddEventStore` and `AddEventProjector` on the same topic
+  still agree on wire format) — the dependency runs one way only, so a service that just wants typed
+  projections over an ordinary topic now pulls in nothing aggregate-related at all.
+  - Migration: add a `PackageReference` to `RedisEvents.Projections`, and change
+    `using RedisEvents.EventSourcing;` to `using RedisEvents.Projections;` in any file that uses the
+    types above. `AggregateRoot`, `IEventRepository`, `RedisEventRepository`, `ConcurrencyException`
+    and `AddEventStore` stay in `RedisEvents.EventSourcing`, unchanged.
+  - `RedisEvents.Projections` has its own test project (`RedisEvents.Projections.UnitTests`,
+    `RedisEvents.Projections.Tests`) and README, and is independently packable/publishable.
+
 ## 2026-09-13 (2)
 
 ### Added

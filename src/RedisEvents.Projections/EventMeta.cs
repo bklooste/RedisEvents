@@ -1,4 +1,4 @@
-namespace RedisEvents.EventSourcing;
+namespace RedisEvents.Projections;
 
 /// <summary>
 /// The envelope facts about one decoded event, handed to an <see cref="IProjection{TEvent}"/>
@@ -22,14 +22,15 @@ namespace RedisEvents.EventSourcing;
 /// <para>
 /// <b>No aggregate version here, by design.</b> The read side depends only on standard RedisEvents
 /// streams — a topic's own partitioning and per-partition ordering — not on whether the write side
-/// happens to be an <see cref="AggregateRoot"/>. Redis already assigns every entry a monotonically
+/// happens to be an event-sourced aggregate (<c>RedisEvents.EventSourcing.AggregateRoot</c>, in the
+/// sibling package). Redis already assigns every entry a monotonically
 /// increasing <see cref="Id"/> within its partition, and a topic is partitioned by key, so all events
 /// for one key arrive at one projector instance in publish order for free. That is everything an
 /// idempotent projection needs: a redelivery is a replay of an already-seen contiguous prefix, never
 /// a reordering, so a running total or append-style update just needs to compare the incoming
 /// <see cref="Id"/> (it implements <see cref="IComparable{T}"/>) against the last one it applied and
 /// skip when it is not greater — no manufactured version number, and no dependency on the event
-/// having come from <see cref="AddEventStore"/> at all. A set-semantics update (replace the whole
+/// having come from <c>RedisEvents.EventSourcing</c>'s <c>AddEventStore</c> at all. A set-semantics update (replace the whole
 /// view) needs no guard either way.
 /// </para>
 /// </remarks>

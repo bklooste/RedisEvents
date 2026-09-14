@@ -9,6 +9,7 @@ using RedisEvents.Config;
 using RedisEvents.EventSourcing;
 using RedisEvents.EventSourcing.Sample.Inventory;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 
 namespace RedisEvents.Tests;
 

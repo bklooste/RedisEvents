@@ -5,9 +5,9 @@ using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
-using RedisEvents.EventSourcing;
 using RedisEvents.Extensions;
 using RedisEvents.Producer;
+using RedisEvents.Projections;
 
 namespace RedisEvents.Tests;
 
