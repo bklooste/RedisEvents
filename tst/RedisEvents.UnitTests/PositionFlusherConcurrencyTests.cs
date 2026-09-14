@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using FluentAssertions;
 
 using RedisEvents.Positions;
@@ -33,6 +35,24 @@ public class PositionFlusherConcurrencyTests
     private const int PerPartition = 20_000;
 
     /// <summary>
+    /// How long a writer keeps recording, past <see cref="PerPartition"/>, waiting for the drain side
+    /// to have raced it at least 3 times before giving up on that precondition and just stopping.
+    /// </summary>
+    /// <remarks>
+    /// Wall-clock, not a multiple of <see cref="PerPartition"/>: the earlier fixed-iteration bailout
+    /// (20x) is a fixed amount of CPU work, and how long that takes to burn through depends on how many
+    /// cores the four writers actually get. On a contended runner the drain side's own thread can go
+    /// unscheduled for a while — <c>Recording_while_the_flusher_drains...</c>'s hand-driven
+    /// <c>await FlushAsync()</c> loop needs a thread-pool thread for its continuation, and
+    /// <c>The_running_timer_loop...</c>'s real <c>PeriodicTimer</c> needs one for its callback — so a
+    /// CPU-work bailout can be exhausted before the drain side gets scheduled even once, which is a
+    /// false failure of the precondition check, not the race it exists to test. Ten seconds is far more
+    /// than any healthy run needs (the precondition is normally satisfied in well under one), and gives
+    /// the drain side room to actually get a timeslice under real contention.
+    /// </remarks>
+    private static readonly TimeSpan RaceDeadline = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Four partitions recorded from four threads while a fifth drains them in a tight loop. Nothing
     /// torn is ever stored, positions never go backwards, and the last record of every partition has
     /// reached the store once the flusher has stopped.
@@ -63,12 +83,13 @@ public class PositionFlusherConcurrencyTests
             writers[p] = Task.Run(() =>
             {
                 var i = 0;
+                var elapsed = Stopwatch.StartNew();
                 while (true)
                 {
                     i++;
                     flusher.Record(partition, new StreamId(i, i));
 
-                    if (i >= PerPartition && (store.Writes >= 3 || i >= PerPartition * 20))
+                    if (i >= PerPartition && (store.Writes >= 3 || elapsed.Elapsed >= RaceDeadline))
                     {
                         break;
                     }
@@ -136,6 +157,7 @@ public class PositionFlusherConcurrencyTests
             writers[p] = Task.Run(() =>
             {
                 var i = 0;
+                var elapsed = Stopwatch.StartNew();
                 while (true)
                 {
                     i++;
@@ -143,7 +165,7 @@ public class PositionFlusherConcurrencyTests
 
                     // Keep going until the timer has ticked and written under the recorder, so the
                     // test cannot pass by having the loop only ever run after the writers finished.
-                    if (i >= PerPartition && (store.Writes >= 3 || i >= PerPartition * 20))
+                    if (i >= PerPartition && (store.Writes >= 3 || elapsed.Elapsed >= RaceDeadline))
                     {
                         break;
                     }
