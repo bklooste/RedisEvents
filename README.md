@@ -70,10 +70,15 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   LZ4 compression — a message over 1024 bytes compresses automatically, decoding needs no
   special-casing either way, and the threshold (or auto-compression itself) is configurable.
 - **Event sourcing, as an opt-in package.** [`RedisEvents.EventSourcing`](src/RedisEvents.EventSourcing/README.md)
-  adds a light event-sourced aggregate root and a typed event projector on top of streams: an
-  aggregate's own Redis stream is its source of truth, saved with optimistic concurrency in the same
-  transaction that publishes to the topic, and a projector rides the ordinary consumer — so positions,
-  replay and the error contract are exactly core's, with nothing added on top.
+  adds a light event-sourced aggregate root: an aggregate's own Redis stream is its source of truth,
+  saved with optimistic concurrency in the same transaction that publishes to the topic.
+- **Typed projections and view stores, as a separate opt-in package.**
+  [`RedisEvents.Projections`](src/RedisEvents.Projections/README.md) adds reflection-free dispatch from
+  any standard topic to `IProjection<TEvent>` handlers, plus a minimal `IViewStore<TView>` seam — usable
+  entirely on its own, with no event-sourced write side required. The projector rides the ordinary
+  consumer, so positions, replay and the error contract are exactly core's, with nothing added on top.
+  `RedisEvents.EventSourcing` depends on this package (for a shared event-type registry per topic); this
+  package never depends back.
 
 ## Quickstart
 
@@ -269,7 +274,9 @@ src/
   RedisEvents/               core library — producers, consumers, positions, outbox, admin, wire format
   RedisEvents.Web/           ASP.NET Core health check + admin minimal-API endpoints
   RedisEvents.MessagePack/   MessagePack-typed publish/consume, with size-gated LZ4 compression
-  RedisEvents.EventSourcing/ event-sourced aggregate root + typed event projector on top of streams
+  RedisEvents.EventSourcing/ event-sourced aggregate root + optimistic-concurrency repository (write side)
+  RedisEvents.Projections/   typed event projector + view stores on any standard topic (read side); no
+                              dependency on RedisEvents.EventSourcing — that package depends on this one
 samples/
   RedisEvents.EventSourcing.Sample.Inventory/           a worked example (not published) used as test fixtures
   RedisEvents.EventSourcing.Sample.Inventory.CommandApi/ runnable command-side microservice built on the sample above
@@ -280,6 +287,8 @@ tst/
   RedisEvents.MessagePack.UnitTests/       RedisEvents.MessagePack unit tests
   RedisEvents.EventSourcing.UnitTests/     RedisEvents.EventSourcing unit tests
   RedisEvents.EventSourcing.Tests/         RedisEvents.EventSourcing integration tests against a real Redis
+  RedisEvents.Projections.UnitTests/       RedisEvents.Projections unit tests
+  RedisEvents.Projections.Tests/           RedisEvents.Projections integration tests against a real Redis
   RedisEvents.EventSourcing.Sample.Tests/  both sample microservices hosted together over real HTTP and a real Redis
   RedisEvents.TestSupport/                 shared Redis Testcontainers fixture used by the integration-test projects
 ```
