@@ -4,7 +4,7 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
-## Unreleased
+## 2026-09-15
 
 ### Added
 
