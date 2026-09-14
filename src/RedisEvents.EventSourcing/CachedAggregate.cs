@@ -90,6 +90,15 @@ public sealed class CachedAggregate<TAggregate>
     /// <paramref name="maxAttempts"/>, nor for a <see cref="AggregateDecision{T}.Redo"/>, which is not a
     /// concurrency loss.
     /// </param>
+    /// <param name="expectedVersion">
+    /// The version <see cref="IEventRepository.SaveAsync"/> is told to expect, computed from the
+    /// aggregate about to be saved. Defaults to <see cref="AggregateRoot.Version"/>, which is correct
+    /// for an aggregate always loaded by full replay from event zero. It is <b>not</b> correct for one
+    /// that can be restored from a snapshot plus a partial replay — there, <c>Version</c> only counts
+    /// the events replayed onto <em>this instance</em>, not the stream's true length, and the aggregate
+    /// must expose its own true version (typically <c>snapshotBaseVersion + Version</c>) for this to
+    /// pass in instead.
+    /// </param>
     /// <param name="ct">Cancellation.</param>
     /// <returns>The result <paramref name="apply"/> decided, once its decision has been saved (or needed no save).</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxAttempts"/> is less than 1.</exception>
@@ -102,6 +111,7 @@ public sealed class CachedAggregate<TAggregate>
         Func<TAggregate, bool, CancellationToken, ValueTask<AggregateDecision<T>>> apply,
         int maxAttempts = 1,
         Func<int, ConcurrencyException, CancellationToken, Task>? onConflict = null,
+        Func<TAggregate, int>? expectedVersion = null,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(load);
@@ -138,7 +148,7 @@ public sealed class CachedAggregate<TAggregate>
 
             try
             {
-                await repository.SaveAsync(aggregate, ct: ct).ConfigureAwait(false);
+                await repository.SaveAsync(aggregate, expectedVersion?.Invoke(aggregate), ct: ct).ConfigureAwait(false);
                 this.cached = aggregate;
                 return decision.Result;
             }
