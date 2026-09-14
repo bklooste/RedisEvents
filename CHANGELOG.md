@@ -18,6 +18,11 @@ actually changed.
   events and then failed and must be dropped before the rest re-apply; a no-op decision made against a
   cached copy that turned out to be stale). Deliberately not a lock, an actor, or a cache with its own
   eviction policy — how access is serialized and how long an idle instance lives stay the caller's call.
+- `CachedAggregate<TAggregate>.RunAsync` gained an optional `expectedVersion` selector, found needed by
+  the first real migration onto it (exchange-orderbook's `Market`, snapshot-restorable so
+  `AggregateRoot.Version` alone is not its true stream position — the save was losing its concurrency
+  check against a version nothing had actually written). Defaults to `aggregate.Version`, unchanged from
+  before this existed.
 
 ## 2026-09-14
 

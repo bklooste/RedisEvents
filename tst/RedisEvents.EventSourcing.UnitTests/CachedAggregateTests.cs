@@ -150,6 +150,37 @@ public sealed class CachedAggregateTests
     }
 
     [Fact]
+    public async Task Without_an_expectedversion_selector_the_aggregates_own_version_is_used()
+    {
+        var repository = new FakeEventRepository();
+        var runner = new CachedAggregate<Counter>();
+
+        await runner.RunAsync(LoaderFor(repository), repository, (c, _, _) => Done(c.Increment(1)), ct: default);
+
+        repository.LastExpectedVersionArgument.Should().BeNull("SaveAsync defaults an unset expectedVersion to the aggregate's own Version itself");
+    }
+
+    [Fact]
+    public async Task An_expectedversion_selector_overrides_the_aggregates_own_version()
+    {
+        // Simulates an aggregate whose true stream position isn't AggregateRoot.Version — one restored
+        // from a snapshot plus a partial replay, for instance, where Version only counts the events
+        // replayed onto this instance. 41 stands in for "the real version", deliberately not what the
+        // aggregate's own Version would be (0, for a freshly constructed Counter).
+        var repository = new FakeEventRepository();
+        var runner = new CachedAggregate<Counter>();
+
+        await runner.RunAsync(
+            LoaderFor(repository),
+            repository,
+            (c, _, _) => Done(c.Increment(1)),
+            expectedVersion: _ => 41,
+            ct: default);
+
+        repository.LastExpectedVersionArgument.Should().Be(41);
+    }
+
+    [Fact]
     public async Task Maxattempts_below_one_is_rejected()
     {
         var repository = new FakeEventRepository();
@@ -200,6 +231,9 @@ public sealed class CachedAggregateTests
         /// <summary>How many upcoming <see cref="SaveAsync"/> calls throw <see cref="ConcurrencyException"/> instead of landing.</summary>
         public int ConflictsToForce { get; set; }
 
+        /// <summary>The exact <c>expectedVersion</c> argument the last <see cref="SaveAsync"/> call received, null included.</summary>
+        public int? LastExpectedVersionArgument { get; private set; }
+
         public ValueTask<TAggregate?> LoadAsync<TAggregate>(string id, CancellationToken ct = default)
             where TAggregate : AggregateRoot, new()
         {
@@ -218,6 +252,7 @@ public sealed class CachedAggregateTests
         public ValueTask<int> SaveAsync(AggregateRoot aggregate, int? expectedVersion = null, PublishOptions options = default, CancellationToken ct = default)
         {
             Saves++;
+            this.LastExpectedVersionArgument = expectedVersion;
 
             if (this.ConflictsToForce > 0)
             {
