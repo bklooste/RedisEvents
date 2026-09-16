@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
+using RedisEvents.Config;
 using StackExchange.Redis;
 
 namespace RedisEvents.Projections;
@@ -13,10 +14,12 @@ namespace RedisEvents.Projections;
 /// <remarks>
 /// <para>
 /// <b>Storage shape.</b> All views of one type live in a single hash keyed
-/// <c>{topic}:view:&lt;viewName&gt;</c> — the same <c>{topic}</c> hash-tag brace convention core uses
-/// for state keys (see <c>Outbox.StateKey</c>), though a view does not need to share the topic's hash
-/// slot; the prefix is namespacing only, chosen so two services on the same Redis using the same
-/// <paramref name="viewName">view name</paramref> under different topics never collide.
+/// <c>&lt;env&gt;:re:{topic}:view:&lt;service&gt;:&lt;viewName&gt;</c> — the same <c>{topic}</c>
+/// hash-tag brace convention core uses for state keys (see <c>Outbox.StateKey</c>), though a view
+/// does not need to share the topic's hash slot; the prefix is namespacing only. The environment
+/// segment (<see cref="KeyNamespace.Prefix"/>) keeps two environments sharing one Redis apart, and
+/// the service segment (<see cref="KeyNamespace.DefaultServiceName"/>) keeps two services that pick
+/// the same <paramref name="viewName">view name</paramref> under the same topic apart too.
 /// <see cref="GetAsync"/>/<see cref="SetAsync"/>/<see cref="DeleteAsync"/> are <c>HGET</c>/<c>HSET</c>/
 /// <c>HDEL</c> on the view's field; <see cref="ListAsync"/> is <c>HSCAN</c> over the whole hash — one
 /// key to reason about, and listing comes for free.
@@ -64,7 +67,7 @@ public sealed class RedisViewStore<TView> : IViewStore<TView>
         ArgumentNullException.ThrowIfNull(typeInfo);
 
         this.db = db;
-        this.key = $"{{{topic}}}:view:{viewName}";
+        this.key = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{KeyNamespace.DefaultServiceName()}:{viewName}";
         this.typeInfo = typeInfo;
     }
 

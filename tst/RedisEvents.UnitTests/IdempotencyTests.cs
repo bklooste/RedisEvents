@@ -1,5 +1,6 @@
 using System.Reflection;
 using FluentAssertions;
+using RedisEvents.Config;
 using RedisEvents.Errors;
 using RedisEvents.Producer;
 using StackExchange.Redis;
@@ -31,10 +32,12 @@ public class IdempotencyTests
     [Trait("TestType", "UnitTest")]
     public void KeyIsHashTaggedOnScope()
     {
-        Idempotency.Key("bets", "abc").ToString().Should().Be("dedupe:{bets}:abc");
+        var ns = KeyNamespace.Prefix();
+
+        Idempotency.Key("bets", "abc").ToString().Should().Be($"{ns}dedupe:{{bets}}:abc");
 
         // Same tag as the topic's stream and state keys, which is the whole point.
-        Outbox.StateKey("bets", "abc").ToString().Should().Be("{bets}:state:abc");
+        Outbox.StateKey("bets", "abc").ToString().Should().Be($"{ns}{{bets}}:state:abc");
         HashTag(Idempotency.Key("bets", "abc").ToString()!).Should().Be("bets");
         HashTag(Outbox.StateKey("bets", "abc").ToString()!).Should().Be("bets");
     }
@@ -146,7 +149,7 @@ public class IdempotencyTests
 
         first.Should().BeTrue();
         recorder.Calls.Should().Be(1);
-        recorder.LastKey.Should().Be("dedupe:{bet-placed}:bet-123");
+        recorder.LastKey.Should().Be($"{KeyNamespace.Prefix()}dedupe:{{bet-placed}}:bet-123");
         recorder.LastWhen.Should().Be(When.NotExists);
         recorder.LastExpiry.Should().Be(TimeSpan.FromHours(24));
     }

@@ -52,11 +52,11 @@ public class ProducerTests
         for (var p = 0; p < 8; p++)
         {
             await publisher.PublishAsync(key, Body("a"), "T", new PublishOptions(Partition: p));
-            redis.LastStreamKey.Should().Be($"s:{{{Topic}}}:{p}");
+            redis.LastStreamKey.Should().Be($"{KeyNamespace.Prefix()}s:{{{Topic}}}:{p}");
         }
 
         // The hashed partition is deterministic, so the loop above genuinely overrode it at least once.
-        hashed.Should().StartWith($"s:{{{Topic}}}:");
+        hashed.Should().StartWith($"{KeyNamespace.Prefix()}s:{{{Topic}}}:");
 
         // The partition key still travels on the entry even when it did not pick the partition.
         await publisher.PublishAsync(key, Body("a"), "T", new PublishOptions(Partition: 3));
@@ -579,7 +579,7 @@ public class ProducerTests
         await publisher.EnsureTopicAsync();
 
         _ = await publisher.PublishAsync("k", Body("a"), "T");
-        redis.LastStreamKey.Should().Be($"s:{{{Topic}}}:0");
+        redis.LastStreamKey.Should().Be($"{KeyNamespace.Prefix()}s:{{{Topic}}}:0");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -604,7 +604,7 @@ public class ProducerTests
         var tagged = () => Outbox.EnsureSameSlot("bets", new[] { Outbox.StateKey("bets", "123") });
         tagged.Should().NotThrow();
 
-        Outbox.StateKey("bets", "123").ToString().Should().Be("{bets}:state:123");
+        Outbox.StateKey("bets", "123").ToString().Should().Be($"{KeyNamespace.Prefix()}{{bets}}:state:123");
 
         // An empty declared key is a mistake rather than "no key".
         var empty = () => Outbox.EnsureSameSlot("bets", new RedisKey[] { default });
