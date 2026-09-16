@@ -1083,7 +1083,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             count,
             this.consumer.ReadMode);
 
-        var reading = PartitionWorker.ReadGroupLoopAsync(contexts, from, fetch, groupCts.Token, resets);
+        var reading = PartitionWorker.ReadGroupLoopAsync(contexts, from, fetch, groupCts.Token, resets, this.RewindNotifier());
 
         _ = reading.ContinueWith(
             faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located read loop"),
@@ -1271,7 +1271,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             hopToThreadPool: this.consumer.ReadMode == ReadMode.Block,
             this.consumer.Persist,
             flush,
-            resets);
+            resets,
+            this.RewindNotifier());
 
         _ = reading.ContinueWith(
             faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located inline read loop"),
@@ -1442,11 +1443,12 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 persist,
                 flush,
                 resets,
-                seek);
+                seek,
+                this.RewindNotifier());
         }
         else
         {
-            var reading = PartitionWorker.ReadLoopAsync(ctx, from, fetch, partitionCts.Token, resets, seek);
+            var reading = PartitionWorker.ReadLoopAsync(ctx, from, fetch, partitionCts.Token, resets, seek, this.RewindNotifier());
             var channelReader = channel.Reader;
 
             // Task.Run: handler code starts on the standard ThreadPool, never on a reader thread.
@@ -1875,6 +1877,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         _ = partition;
         _ = id;
     }
+
+    /// <summary>
+    /// The read loop's hook back into the position flusher for a live reset, or <see langword="null"/>
+    /// when there is no flusher (<see cref="PersistMode.None"/>) for it to notify.
+    /// </summary>
+    /// <returns><see cref="PositionFlusher.Rewind"/>, bound to this host's flusher.</returns>
+    private Action<int>? RewindNotifier() => this.flusher is { } positions ? positions.Rewind : null;
 
     /// <summary>
     /// Group mode's stand-in for the position flusher: remember the batch's last id when the handler

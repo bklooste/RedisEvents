@@ -924,7 +924,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
                 if (signal.TryClearTaken(partition, out var applied))
                 {
-                    this.Rewind(partition);
+                    // Rewind() already ran on the read loop's thread when it took this reset (see
+                    // Rewind's remarks) — this tick only deletes the now-safe-to-clear marker field
+                    // and counts the reset as applied.
                     Interlocked.Increment(ref this.resetsApplied);
 
                     // Information, not Warning: the reset itself was already warned about, twice —
@@ -965,13 +967,24 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// overruled.
     /// </para>
     /// <para>
+    /// <b>Called by the read loop, synchronously with taking the reset — not by the flusher's own
+    /// poll tick.</b> The read loop applies the seek and can read and record a brand-new, correct
+    /// post-reset position before the flusher's tick gets back around to noticing the take (it first
+    /// awaits a Redis round trip to delete the marker field). Clearing the pending value from that
+    /// later, independently-timed tick would discard a position that already reflects the replay
+    /// rather than one left over from before it — silently freezing the stored position at the reset
+    /// target forever, since nothing sets it dirty again once the replay has drained. Calling this at
+    /// take-time, on the same thread that is about to issue the seeked read, guarantees the clear
+    /// always happens before any post-seek <see cref="Record"/> rather than racing it.
+    /// </para>
+    /// <para>
     /// Batches already in flight when the reset landed are still processed and still recorded, so the
     /// stored position can move forward again before the replay catches up. Every entry after the
     /// target is delivered either way; what a crash inside that window costs is the remainder of the
     /// replay, which is the honest reason the runbook prefers scale-to-zero.
     /// </para>
     /// </remarks>
-    private void Rewind(int partition)
+    internal void Rewind(int partition)
     {
         if ((uint)partition >= (uint)this.dirty.Length)
         {

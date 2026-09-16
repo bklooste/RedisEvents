@@ -70,13 +70,20 @@ internal static partial class PartitionWorker
     /// <param name="seek">Moves the fetch's cursor. Required for a live reset to be taken at all: with
     /// no way to move the cursor there is nothing this loop could do with one, so the marker is left
     /// in Redis for a restart to apply.</param>
+    /// <param name="rewind">
+    /// Notifies the position flusher that this partition just took a reset, so it drops any pending
+    /// position recorded before the seek. Called synchronously, before the next fetch, so a record
+    /// made after this call — for a batch actually read from the seeked position — is never clobbered
+    /// by it. See <c>PositionFlusher.Rewind</c>.
+    /// </param>
     internal static async Task ReadLoopAsync(
         PartitionContext ctx,
         StreamId from,
         Func<CancellationToken, ValueTask<StreamEntryBatch>> fetch,
         CancellationToken ct,
         ResetSignal? resets = null,
-        ResetSeek? seek = null)
+        ResetSeek? seek = null,
+        Action<int>? rewind = null)
     {
         ArgumentNullException.ThrowIfNull(fetch);
 
@@ -108,7 +115,7 @@ internal static partial class PartitionWorker
             {
                 if (resets is not null && seek is not null && resets.HasPending)
                 {
-                    ApplyReset(in ctx, resets, seek);
+                    ApplyReset(in ctx, resets, seek, rewind);
                 }
 
                 StreamEntryBatch raw;
@@ -210,12 +217,18 @@ internal static partial class PartitionWorker
     /// cursor array, so it needs no seek delegate: a taken reset is a store into
     /// <c>positions[slot]</c> and the next <c>XREAD</c> asks for the target.
     /// </param>
+    /// <param name="rewind">
+    /// Notifies the position flusher that a partition just took a reset, so it drops any pending
+    /// position recorded before the seek. See <c>PositionFlusher.Rewind</c> and the single-partition
+    /// overload's matching parameter.
+    /// </param>
     internal static async Task ReadGroupLoopAsync(
         PartitionContext[] partitions,
         StreamId[] from,
         MultiStreamFetch fetch,
         CancellationToken ct,
-        ResetSignal? resets = null)
+        ResetSignal? resets = null,
+        Action<int>? rewind = null)
     {
         ArgumentNullException.ThrowIfNull(partitions);
         ArgumentNullException.ThrowIfNull(from);
@@ -287,7 +300,7 @@ internal static partial class PartitionWorker
             {
                 if (resets is not null && resets.HasPending)
                 {
-                    ApplyResets(partitions, resets, positions);
+                    ApplyResets(partitions, resets, positions, rewind);
                 }
 
                 StreamSlice[] reply;
@@ -573,18 +586,24 @@ internal static partial class PartitionWorker
     /// <param name="ctx">The partition's context.</param>
     /// <param name="resets">The reset hand-off.</param>
     /// <param name="seek">Moves the fetch's read cursor.</param>
+    /// <param name="rewind">
+    /// Notifies the position flusher of the take, so it drops any position pending from before the
+    /// seek. Called before <paramref name="seek"/> moves the cursor, so the flusher's pending state is
+    /// clear before this partition can possibly read — and record — anything from the new position.
+    /// </param>
     /// <remarks>
     /// Taking the reset is what tells the flusher it may delete the marker, so this must happen only
     /// when the cursor has actually moved — hence the call order, and hence the loop taking nothing at
     /// all when it has no <see cref="ResetSeek"/> to move it with.
     /// </remarks>
-    private static void ApplyReset(in PartitionContext ctx, ResetSignal resets, ResetSeek seek)
+    private static void ApplyReset(in PartitionContext ctx, ResetSignal resets, ResetSeek seek, Action<int>? rewind)
     {
         if (!resets.TryTake(ctx.Partition, out var marker))
         {
             return;
         }
 
+        rewind?.Invoke(ctx.Partition);
         seek(marker.Target);
 
         ctx.Log.LogWarning(
@@ -601,12 +620,17 @@ internal static partial class PartitionWorker
     /// <param name="partitions">The group's contexts.</param>
     /// <param name="resets">The reset hand-off.</param>
     /// <param name="positions">The cursor array the next <c>XREAD</c> will use, mutated in place.</param>
+    /// <param name="rewind">
+    /// Notifies the position flusher of each take, so it drops any position pending from before the
+    /// seek. Called before the cursor is rewritten, so the flusher's pending state is clear before
+    /// this partition can possibly read — and record — anything from the new position.
+    /// </param>
     /// <remarks>
     /// Only the partitions that were actually reset are touched, so a reset on one partition of a
     /// group of sixteen leaves the other fifteen cursors — and the single round trip — exactly as they
     /// were.
     /// </remarks>
-    private static void ApplyResets(PartitionContext[] partitions, ResetSignal resets, StreamPosition[] positions)
+    private static void ApplyResets(PartitionContext[] partitions, ResetSignal resets, StreamPosition[] positions, Action<int>? rewind)
     {
         for (var i = 0; i < partitions.Length; i++)
         {
@@ -617,6 +641,7 @@ internal static partial class PartitionWorker
                 continue;
             }
 
+            rewind?.Invoke(ctx.Partition);
             positions[i] = new StreamPosition(ctx.StreamKey, marker.Target.Format());
 
             ctx.Log.LogWarning(
