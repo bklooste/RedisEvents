@@ -55,6 +55,7 @@ internal static partial class PartitionWorker
     /// <param name="flush">The synchronous flush required by the <c>Sync*</c> persist modes.</param>
     /// <param name="resets">Live reset hand-off, or <see langword="null"/>.</param>
     /// <param name="seek">Moves the fetch's read cursor for a live reset, or <see langword="null"/>.</param>
+    /// <param name="rewind">Notifies the position flusher of a take; see <c>PositionFlusher.Rewind</c>.</param>
     internal static Task RunInlineAsync(
         in PartitionContext ctx,
         StreamId from,
@@ -66,13 +67,14 @@ internal static partial class PartitionWorker
         PersistMode persist = PersistMode.AsyncBatch,
         PositionFlush? flush = null,
         ResetSignal? resets = null,
-        ResetSeek? seek = null)
+        ResetSeek? seek = null,
+        Action<int>? rewind = null)
     {
         // Copied out of the `in` parameter so the loop's state machine can hold it.
         var local = ctx;
 
         return ReadInlineLoopAsync(
-            local, from, fetch, handler, positions, ct, hopToThreadPool, persist, flush, resets, seek);
+            local, from, fetch, handler, positions, ct, hopToThreadPool, persist, flush, resets, seek, rewind);
     }
 
     /// <summary>
@@ -90,7 +92,8 @@ internal static partial class PartitionWorker
         PersistMode persist = PersistMode.AsyncBatch,
         PositionFlush? flush = null,
         ResetSignal? resets = null,
-        ResetSeek? seek = null)
+        ResetSeek? seek = null,
+        Action<int>? rewind = null)
     {
         ArgumentNullException.ThrowIfNull(fetch);
         ArgumentNullException.ThrowIfNull(handler);
@@ -121,7 +124,7 @@ internal static partial class PartitionWorker
             {
                 if (resets is not null && seek is not null && resets.HasPending)
                 {
-                    ApplyReset(in ctx, resets, seek);
+                    ApplyReset(in ctx, resets, seek, rewind);
                 }
 
                 StreamEntryBatch raw;
@@ -195,7 +198,8 @@ internal static partial class PartitionWorker
         bool hopToThreadPool = false,
         PersistMode persist = PersistMode.AsyncBatch,
         PositionFlush? flush = null,
-        ResetSignal? resets = null)
+        ResetSignal? resets = null,
+        Action<int>? rewind = null)
     {
         ArgumentNullException.ThrowIfNull(partitions);
         ArgumentNullException.ThrowIfNull(from);
@@ -262,7 +266,7 @@ internal static partial class PartitionWorker
             {
                 if (resets is not null && resets.HasPending)
                 {
-                    ApplyResets(partitions, resets, cursors);
+                    ApplyResets(partitions, resets, cursors, rewind);
                 }
 
                 StreamSlice[] reply;

@@ -591,6 +591,12 @@ public class PositionTests
 
         await Wait(() => signal.HasPending, "the reset became pending");
         signal.TryTake(0, out _).Should().BeTrue();
+
+        // The read loop calls this itself, synchronously with taking the reset — see Rewind's
+        // remarks. This test drives the flusher directly, with no read loop above it, so it must
+        // simulate that call rather than wait for one nobody here is going to make.
+        flusher.Rewind(0);
+
         await Wait(() => flusher.ResetsApplied == 1, "the marker was cleared");
         await flusher.StopAsync();
 
