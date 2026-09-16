@@ -215,7 +215,7 @@ public sealed class ReaderIsolationTests(RedisStreamsFixture fixture, ITestOutpu
         _ = await controlDb.StringSetAsync(probeKey, "v");
 
         using var stopBlocking = new CancellationTokenSource();
-        var blocker = BlockForeverAsync(controlDb, $"s:{{{topic}}}:0", stopBlocking.Token);
+        var blocker = BlockForeverAsync(controlDb, $"{KeyNamespace.Prefix()}s:{{{topic}}}:0", stopBlocking.Token);
 
         List<double> stalled;
         try
@@ -774,7 +774,7 @@ public sealed class ReaderIsolationTests(RedisStreamsFixture fixture, ITestOutpu
     };
 
     private static RedisKey StreamKey(string topic, int partition)
-        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"s:{{{topic}}}:{partition}");
+        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"{KeyNamespace.Prefix()}s:{{{topic}}}:{partition}");
 
     private StreamOptions Root(string topic, TopicOptions topicOptions) => new()
     {

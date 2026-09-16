@@ -98,10 +98,10 @@ public class OutboxTransactionTests
 
         ids.Should().NotBeNull();
         redis.StreamKeys.Should().HaveCount(2);
-        redis.StreamKeys[0].Should().Be($"s:{{{Topic}}}:2", "an explicit partition wins outright");
+        redis.StreamKeys[0].Should().Be($"{KeyNamespace.Prefix()}s:{{{Topic}}}:2", "an explicit partition wins outright");
 
         var routed = PartitionRouter.ForKey(System.Text.Encoding.UTF8.GetBytes("customer-1"), 4);
-        redis.StreamKeys[1].Should().Be($"s:{{{Topic}}}:{routed}", "an unrouted publish hashes its key exactly as StreamPublisher does");
+        redis.StreamKeys[1].Should().Be($"{KeyNamespace.Prefix()}s:{{{Topic}}}:{routed}", "an unrouted publish hashes its key exactly as StreamPublisher does");
     }
 
     /// <summary>An explicit partition outside the topic's range is a caller bug, caught before anything is queued.</summary>
@@ -190,7 +190,7 @@ public class OutboxTransactionTests
             });
 
         ids.Should().NotBeNull().And.HaveCount(2);
-        redis.StreamKeys.Should().AllBe($"s:{Topic}:1");
+        redis.StreamKeys.Should().AllBe($"{KeyNamespace.Prefix()}s:{Topic}:1");
     }
 
     /// <summary>

@@ -39,13 +39,14 @@ public class AdminEndpointTests
     public void Ownership_scan_glob_keeps_the_literal_hash_tag_braces()
     {
         var pattern = StreamAdminEndpoints.OwnershipKeyPattern(Topic);
+        var ns = KeyNamespace.Prefix();
 
         pattern.Should().Be(
-            "o:{" + Topic + "}:*",
+            ns + "o:{" + Topic + "}:*",
             "the braces are Redis Cluster hash tags and are part of the key, so a glob without them matches nothing");
 
         pattern.Should().NotBe(
-            $"o:{Topic}:*",
+            $"{ns}o:{Topic}:*",
             "C# interpolation substitutes the topic for the braces, which is the bug this test exists for");
 
         pattern.Should().Be(
@@ -60,7 +61,7 @@ public class AdminEndpointTests
         var prefix = StreamAdminEndpoints.OwnershipKeyPrefix(Topic);
         var key = StreamKeys.Ownership(Topic, "svc-0").ToString();
 
-        prefix.Should().Be("o:{" + Topic + "}:");
+        prefix.Should().Be(KeyNamespace.Prefix() + "o:{" + Topic + "}:");
         key.Should().StartWith(prefix);
         key[prefix.Length..].Should().Be("svc-0", "the endpoint reports what it trims off as the consumer name");
     }

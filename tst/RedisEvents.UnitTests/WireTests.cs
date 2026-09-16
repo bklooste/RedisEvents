@@ -1,5 +1,6 @@
 using System.Text;
 using FluentAssertions;
+using RedisEvents.Config;
 using RedisEvents.Errors;
 using RedisEvents.Wire;
 using StackExchange.Redis;
@@ -626,22 +627,26 @@ public class WireTests
     [Trait("TestType", "UnitTest")]
     public void StreamKeys_UseLiteralBracesAroundTheTopicAsHashTag()
     {
-        ((string?)StreamKeys.Stream("offer_odds", 0)).Should().Be("s:{offer_odds}:0");
-        ((string?)StreamKeys.Stream("offer_odds", 15)).Should().Be("s:{offer_odds}:15");
-        ((string?)StreamKeys.Positions("offer_odds", "offer-products")).Should().Be("p:{offer_odds}:offer-products");
-        ((string?)StreamKeys.PositionsMeta("offer_odds", "offer-products")).Should().Be("p:{offer_odds}:offer-products:meta");
-        ((string?)StreamKeys.Ownership("offer_odds", "offer-products")).Should().Be("o:{offer_odds}:offer-products");
-        ((string?)StreamKeys.TopicMeta("offer_odds")).Should().Be("m:{offer_odds}");
-        StreamKeys.PositionsPattern("offer_odds").Should().Be("p:{offer_odds}:*");
-        StreamKeys.StreamPattern("offer_odds").Should().Be("s:{offer_odds}:*");
+        var ns = KeyNamespace.Prefix();
+
+        ((string?)StreamKeys.Stream("offer_odds", 0)).Should().Be($"{ns}s:{{offer_odds}}:0");
+        ((string?)StreamKeys.Stream("offer_odds", 15)).Should().Be($"{ns}s:{{offer_odds}}:15");
+        ((string?)StreamKeys.Positions("offer_odds", "offer-products")).Should().Be($"{ns}p:{{offer_odds}}:offer-products");
+        ((string?)StreamKeys.PositionsMeta("offer_odds", "offer-products")).Should().Be($"{ns}p:{{offer_odds}}:offer-products:meta");
+        ((string?)StreamKeys.Ownership("offer_odds", "offer-products")).Should().Be($"{ns}o:{{offer_odds}}:offer-products");
+        ((string?)StreamKeys.TopicMeta("offer_odds")).Should().Be($"{ns}m:{{offer_odds}}");
+        StreamKeys.PositionsPattern("offer_odds").Should().Be($"{ns}p:{{offer_odds}}:*");
+        StreamKeys.StreamPattern("offer_odds").Should().Be($"{ns}s:{{offer_odds}}:*");
     }
 
     [Fact]
     [Trait("TestType", "UnitTest")]
     public void StreamKeys_CoLocateFalse_DropsTheHashTag()
     {
-        ((string?)StreamKeys.Stream("offer_odds", 3, coLocate: false)).Should().Be("s:offer_odds:3");
-        StreamKeys.StreamPattern("offer_odds", coLocate: false).Should().Be("s:offer_odds:*");
+        var ns = KeyNamespace.Prefix();
+
+        ((string?)StreamKeys.Stream("offer_odds", 3, coLocate: false)).Should().Be($"{ns}s:offer_odds:3");
+        StreamKeys.StreamPattern("offer_odds", coLocate: false).Should().Be($"{ns}s:offer_odds:*");
     }
 
     [Fact]
@@ -667,6 +672,6 @@ public class WireTests
     {
         var topic = new string('t', 400);
 
-        ((string?)StreamKeys.Stream(topic, 7)).Should().Be($"s:{{{topic}}}:7");
+        ((string?)StreamKeys.Stream(topic, 7)).Should().Be($"{KeyNamespace.Prefix()}s:{{{topic}}}:7");
     }
 }

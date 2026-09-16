@@ -1,4 +1,5 @@
 using StackExchange.Redis;
+using RedisEvents.Config;
 using RedisEvents.Errors;
 
 namespace RedisEvents.Producer;
@@ -11,7 +12,8 @@ namespace RedisEvents.Producer;
 public static class Idempotency
 {
     /// <summary>
-    /// Builds the deduplication key for a scope and id: <c>dedupe:{scope}:&lt;id&gt;</c>.
+    /// Builds the deduplication key for a scope and id: <c>&lt;prefix&gt;dedupe:{scope}:&lt;id&gt;</c>,
+    /// where <c>&lt;prefix&gt;</c> is <see cref="KeyNamespace.Prefix"/>, e.g. <c>dev:re:</c>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -51,7 +53,7 @@ public static class Idempotency
                 "Rename the scope.");
         }
 
-        return $"dedupe:{{{scope}}}:{id}";
+        return $"{KeyNamespace.Prefix()}dedupe:{{{scope}}}:{id}";
     }
 
     /// <summary>

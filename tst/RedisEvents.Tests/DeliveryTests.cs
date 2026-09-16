@@ -652,10 +652,10 @@ public sealed class DeliveryTests(RedisStreamsFixture fixture)
     private static string KeyName(int index) => string.Create(CultureInfo.InvariantCulture, $"key-{index}");
 
     private static RedisKey StreamKey(string topic, int partition)
-        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"s:{{{topic}}}:{partition}");
+        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"{KeyNamespace.Prefix()}s:{{{topic}}}:{partition}");
 
     private static RedisKey PositionsKey(string topic, string consumer)
-        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"p:{{{topic}}}:{consumer}");
+        => (RedisKey)string.Create(CultureInfo.InvariantCulture, $"{KeyNamespace.Prefix()}p:{{{topic}}}:{consumer}");
 
     /// <summary>
     /// Waits for the wall clock to leave the current millisecond. A polled condition, not a delay:

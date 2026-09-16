@@ -1,4 +1,5 @@
 using System.Globalization;
+using RedisEvents.Config;
 using StackExchange.Redis;
 
 namespace RedisEvents.Wire;
@@ -9,13 +10,15 @@ namespace RedisEvents.Wire;
 /// <remarks>
 /// The braces in the key shapes are literal: they are Redis Cluster hash tags around the topic
 /// name, so every key belonging to one topic hashes to the same slot and a worker's multi-stream
-/// <c>XREAD</c> plus its position write stay single-node operations.
+/// <c>XREAD</c> plus its position write stay single-node operations. Every shape below carries
+/// <see cref="KeyNamespace.Prefix"/> ahead of the hash tag, e.g. <c>dev:re:s:{topic}:0</c> — outside
+/// the braces, so it does not affect which slot the topic's keys land on.
 /// <list type="bullet">
-///   <item><description>partition stream: <c>s:{topic}:&lt;p&gt;</c></description></item>
-///   <item><description>positions: <c>p:{topic}:&lt;consumer&gt;</c></description></item>
-///   <item><description>positions meta: <c>p:{topic}:&lt;consumer&gt;:meta</c></description></item>
-///   <item><description>ownership / leases: <c>o:{topic}:&lt;consumer&gt;</c></description></item>
-///   <item><description>topic meta: <c>m:{topic}</c></description></item>
+///   <item><description>partition stream: <c>&lt;prefix&gt;s:{topic}:&lt;p&gt;</c></description></item>
+///   <item><description>positions: <c>&lt;prefix&gt;p:{topic}:&lt;consumer&gt;</c></description></item>
+///   <item><description>positions meta: <c>&lt;prefix&gt;p:{topic}:&lt;consumer&gt;:meta</c></description></item>
+///   <item><description>ownership / leases: <c>&lt;prefix&gt;o:{topic}:&lt;consumer&gt;</c></description></item>
+///   <item><description>topic meta: <c>&lt;prefix&gt;m:{topic}</c></description></item>
 /// </list>
 /// All members are allocation-lean: one string per key, built into a stack buffer where it fits.
 /// </remarks>
@@ -86,8 +89,10 @@ internal static class StreamKeys
         string? suffix,
         bool hasTail)
     {
-        // prefix + ':' + ('{' topic '}' | topic) + (':' tail)? + suffix?
-        int length = 2 + topic.Length
+        // namespace + prefix + ':' + ('{' topic '}' | topic) + (':' tail)? + suffix?
+        var ns = KeyNamespace.Prefix();
+
+        int length = ns.Length + 2 + topic.Length
             + (coLocate ? 2 : 0)
             + (hasTail ? 1 + tail.Length : 0)
             + (suffix?.Length ?? 0);
@@ -96,6 +101,8 @@ internal static class StreamKeys
         Span<char> buffer = rented ?? stackalloc char[StackBufferChars];
 
         int at = 0;
+        ns.CopyTo(buffer);
+        at += ns.Length;
         buffer[at++] = prefix;
         buffer[at++] = ':';
         if (coLocate)
