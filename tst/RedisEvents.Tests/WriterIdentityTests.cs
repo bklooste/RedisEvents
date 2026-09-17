@@ -131,6 +131,76 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// The scenario customer-wallet-views' appsettings.json comment describes trying and abandoning
+    /// on <c>Instances:Mode = Lease</c>: pod A gracefully releases the only partition, pod B claims
+    /// it, and then A's last (delayed) position flush lands in the field <em>after</em> B has already
+    /// taken over. The comment says the new owner reads that stale write as a live rival and stands
+    /// itself down — which R-01's live-presence check (see <see cref="PositionFlusher.InspectAsync"/>)
+    /// should already prevent, since A's presence claim is deleted atomically with its partition claim
+    /// on release, before its late flush can land. This proves it against a real Redis rather than by
+    /// reading the source.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_lease_handoff_does_not_falsely_stand_down_the_new_owner()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var topic = fixture.NewTopic("lease-handoff");
+        var consumer = fixture.NewConsumer("lease-handoff");
+
+        await using var podA = fixture.AsInstance("svc-7d4f8b-aaaaa");
+        await using var podB = fixture.AsInstance("svc-7d4f8b-bbbbb");
+
+        var ownA = this.LeaseRegistry(topic, consumer, podA);
+        await ownA.StartAsync(ct);
+        ownA.Held.Should().Equal(new[] { 0 }, "the only instance alive claims the only partition");
+
+        var contestedA = new List<int>();
+        var contestedB = new List<int>();
+
+        await using var flushA = this.Flusher(topic, consumer, podA, (p, _, _) => contestedA.Add(p));
+        await using var flushB = this.Flusher(topic, consumer, podB, (p, _, _) => contestedB.Add(p));
+
+        flushA.Record(0, new StreamId(1000, 0));
+        await flushA.FlushAsync(ct);
+
+        // Graceful release: a draining pod's StopAsync, which deletes the partition claim and the
+        // presence field together in one script call — not a TTL lapse.
+        await ownA.StopAsync(ct);
+
+        await using var ownB = this.LeaseRegistry(topic, consumer, podB);
+        await ownB.StartAsync(ct);
+        ownB.Held.Should().Equal(new[] { 0 }, "the partition was free the moment A released it");
+
+        // The delayed async flush: A writes again even though it has already released ownership,
+        // landing after B has already claimed the partition.
+        flushA.Record(0, new StreamId(1001, 0));
+        await flushA.FlushAsync(ct);
+
+        // Prove the race precondition actually happened, so a pass below cannot be vacuous: the
+        // field really does hold A's stale id when B is about to inspect it.
+        var beforeB = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        beforeB[0].InstanceId.Should().Be(podA.InstanceId, "A's late write really did land after B claimed the partition");
+
+        // B's own flush now finds A's id sitting in the field it is about to overwrite.
+        flushB.Record(0, new StreamId(2000, 0));
+        await flushB.FlushAsync(ct);
+
+        flushB.ContestedCount.Should().Be(
+            0,
+            "A released its ownership claim before this flush landed, so its stale write must not be read as a live rival");
+        contestedB.Should().BeEmpty();
+
+        var stored = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        stored.Should().ContainKey(0);
+        stored[0].Id.Should().Be(new StreamId(2000, 0), "B keeps writing undisturbed");
+        stored[0].InstanceId.Should().Be(podB.InstanceId);
+
+        await flushA.DisposeAsync();
+        await ownB.StopAsync(ct);
+    }
+
+    /// <summary>
     /// A StatefulSet pod bounces back into its own ordinal. The predecessor's position is sitting in
     /// the field, so the first flush of the new process must recognise it as its own history rather
     /// than as a rival and stand itself down.
@@ -313,6 +383,22 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
                 OwnedPartitions = [0],
                 PodName = pod.PodName,
                 InstanceId = pod.InstanceId,
+                TtlSeconds = 30,
+                RenewSeconds = 10,
+            },
+            NullLogger.Instance);
+
+    private OwnershipRegistry LeaseRegistry(string topic, string consumer, RedisStreamsFixture.StreamsInstance pod)
+        => new(
+            pod.Redis,
+            new OwnershipRegistryOptions
+            {
+                Topic = topic,
+                Consumer = consumer,
+                Partitions = 1,
+                PodName = pod.PodName,
+                InstanceId = pod.InstanceId,
+                Mode = InstanceMode.Lease,
                 TtlSeconds = 30,
                 RenewSeconds = 10,
             },
