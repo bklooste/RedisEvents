@@ -4,6 +4,38 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-18
+
+### Changed — breaking (wire)
+
+- **`IEventRepository.SaveAsync` no longer stamps `es-version` or `es-id` headers.** Nothing in the
+  library read either one, yet together they cost 58 packed bytes on every published event. They also
+  forced an `h` field onto events that would otherwise have none, and a `Guid` plus a header list on
+  every save. Events now carry only the caller's correlation id and headers; a save with no options
+  writes no header field at all.
+  - Migration: a consumer that read `es-version` or `es-id` should use `EventMeta.Id` (the Redis
+    stream id: unique, increasing, identical on every redelivery) as an idempotency guard or an
+    event identity. A producer that needs a per-event version can pass it in `PublishOptions.Headers`.
+
+### Changed
+
+- **State-stream entries are now body and type only.** `IStreamStore.AppendAndPublishAsync` (and so
+  `RedisEventRepository.SaveAsync`) used to write the same fields on the aggregate's own stream as on
+  the topic publish: partition key, correlation id, `traceparent` and headers (`es-version`,
+  `es-id`). Loading an aggregate reads none of them, the partition key just repeats the stream name,
+  and state streams are never trimmed, so those bytes were kept forever. For small events they
+  outweighed the body several times over. State entries now carry only `b` and `t`. The topic copy is
+  unchanged, and it is what projections and consumers read.
+  - New `Streams:Topics:<t>:StateMetadata` (default `false`). Set it to `true` to keep correlation
+    id, trace and headers on state entries as well. The partition key is never written on a state
+    entry.
+  - No codec version change. Readers already treated those fields as optional, so existing streams
+    read unchanged and one stream can mix old and new entries. `IStreamStore.ReadAsync` now reports
+    an empty `PartitionKey` (and, by default, no correlation id, trace or headers) for entries
+    written from this version on.
+  - Added a regression test proving that neither inline `MAXLEN` nor the background retention sweep
+    ever trims a state stream, even on an aggressively trimmed topic.
+
 ## 2026-09-17
 
 ### Fixed

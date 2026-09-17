@@ -299,6 +299,7 @@ Keys worth knowing, with their defaults:
 | `Topics:<t>:Partitions` | `2` | Can be increased, never decreased. Caps parallelism |
 | `Topics:<t>:MaxLen` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
 | `Topics:<t>:Trim` | `Approx` | `None` is refused outside `Development` — it is an OOM footgun |
+| `Topics:<t>:StateMetadata` | `false` | State-store entries hold only body and type; `true` also keeps correlation id, trace and headers, forever |
 | `Consumers[n]:BatchSize` | `100` | Bigger batches amortise round trips and widen the redelivery window |
 | `Consumers[n]:Persist` | `AsyncBatch` | `SyncBatch`/`SyncMessage` cost a Redis round trip; `None` never stores a position |
 | `Consumers[n]:PersistIntervalMs` | `1000` | This is your duplicate window on a crash |

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 
 using FluentAssertions;
@@ -66,7 +67,9 @@ public sealed class StreamStoreTests(RedisStreamsFixture fixture)
         read.Select(m => m.Type).Should().Equal("inventory.created", "inventory.renamed", "inventory.deactivated");
         read.Select(m => Encoding.UTF8.GetString(m.Body.Span)).Should().Equal(
             "created", "renamed — ünicode, and a \0 NUL byte", "deactivated");
-        read.Select(m => m.PartitionKey).Should().AllBe(AggregateId);
+
+        // The state copy carries no partition key: the stream's name already is the aggregate.
+        read.Select(m => m.PartitionKey).Should().AllBe(string.Empty);
 
         // The ids are the state entries', so they are exactly what a read back reports.
         read.Select(m => m.Id).Should().Equal(ids);
@@ -216,36 +219,102 @@ public sealed class StreamStoreTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
-    /// Correlation id and headers survive on both copies of an event, so a projection reads the same
-    /// metadata the aggregate's own history carries.
+    /// By default a state entry is body and type only, while its topic entry keeps the partition key,
+    /// correlation id, trace and headers that projections read.
     /// </summary>
     [Fact]
     [Trait("TestType", "ServiceTest")]
-    public async Task Options_are_stamped_on_both_the_state_entry_and_the_topic_entry()
+    public async Task State_entries_are_body_and_type_only_while_the_topic_entry_keeps_its_metadata()
     {
         var topic = fixture.NewTopic();
         var store = new StreamStore(fixture.Db, topic, Options);
 
-        var options = new PublishOptions(
-            CorrelationId: "corr-0f4a1c",
-            Headers: [new KeyValuePair<string, string>("es-version", "1")]);
+        using (TracedActivity())
+        {
+            _ = await store.AppendAndPublishAsync(Name, expectedLength: 0, AggregateId, [Event("body", "t.one", WithMetadata)]);
+        }
 
-        _ = await store.AppendAndPublishAsync(
-            Name,
-            expectedLength: 0,
-            AggregateId,
-            [new StateEvent(Encoding.UTF8.GetBytes("body"), "t.one", options)]);
+        var raw = (await fixture.Db.StreamRangeAsync(Outbox.StateKey(topic, Name))).Single();
+        raw.Values.Select(v => (string?)v.Name).Should().Equal(EntryCodec.BodyField, EntryCodec.TypeField);
 
         var state = (await store.ReadAsync(Name, StreamId.Min, max: 10)).Single();
-        var entries = await fixture.Db.StreamRangeAsync(StreamKeys.Stream(topic, 0), count: null);
-        var published = EntryCodec.Decode(entries.Single(), partition: 0);
+        state.PartitionKey.Should().BeEmpty();
+        state.CorrelationId.Should().BeEmpty();
+        state.TraceParent.Should().BeNull();
+        state.Headers.IsEmpty.Should().BeTrue();
+
+        var published = await PublishedEntry(topic);
+        published.PartitionKey.Should().Be(AggregateId);
+        published.CorrelationId.Should().Be("corr-0f4a1c");
+        published.TraceParent.Should().NotBeNull();
+        published.Headers.GetValueOrDefault("es-version").Should().Be("1");
+    }
+
+    /// <summary>
+    /// With <see cref="TopicOptions.StateMetadata"/> the state entry keeps correlation id, trace and
+    /// headers too — everything but the partition key, which it never carries.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task StateMetadata_keeps_everything_but_the_partition_key_on_the_state_entry()
+    {
+        var topic = fixture.NewTopic();
+        var store = new StreamStore(fixture.Db, topic, Options with { StateMetadata = true });
+
+        using (TracedActivity())
+        {
+            _ = await store.AppendAndPublishAsync(Name, AggregateId, [Event("body", "t.one", WithMetadata)]);
+        }
+
+        var raw = (await fixture.Db.StreamRangeAsync(Outbox.StateKey(topic, Name))).Single();
+        raw.Values.Select(v => (string?)v.Name).Should().NotContain(EntryCodec.PartitionKeyField);
+
+        var state = (await store.ReadAsync(Name, StreamId.Min, max: 10)).Single();
+        var published = await PublishedEntry(topic);
+
+        state.PartitionKey.Should().BeEmpty();
+        published.PartitionKey.Should().Be(AggregateId);
 
         foreach (var message in new[] { state, published })
         {
             message.CorrelationId.Should().Be("corr-0f4a1c");
-            message.Headers.TryGetValue("es-version", out var version).Should().BeTrue();
-            version.Should().Be("1");
+            message.TraceParent.Should().NotBeNull();
+            message.Headers.GetValueOrDefault("es-version").Should().Be("1");
         }
+
+        state.TraceParent.Should().Be(published.TraceParent);
+    }
+
+    /// <summary>
+    /// A state stream written before entries went lean — every entry with <c>k</c> and metadata —
+    /// keeps working: it reads back mixed with new entries, and its length is still the version.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_stream_holding_old_full_entries_and_new_lean_entries_reads_and_versions_as_one()
+    {
+        var topic = fixture.NewTopic();
+        var store = new StreamStore(fixture.Db, topic, Options);
+        var key = Outbox.StateKey(topic, Name);
+
+        // What earlier builds wrote: the topic codec, partition key and all.
+        _ = await fixture.Db.StreamAddAsync(
+            key,
+            EntryCodec.Encode(Encoding.UTF8.GetBytes("old"), "t.old", AggregateId, "corr-old", headers: [new("es-version", "1")]));
+
+        var ids = await store.AppendAndPublishAsync(Name, expectedLength: 1, AggregateId, [Event("new", "t.new")]);
+        ids.Should().NotBeNull();
+
+        var read = await store.ReadAsync(Name, StreamId.Min, max: 10);
+
+        read.Select(m => m.Type).Should().Equal("t.old", "t.new");
+        read.Select(m => Encoding.UTF8.GetString(m.Body.Span)).Should().Equal("old", "new");
+        read[0].PartitionKey.Should().Be(AggregateId);
+        read[0].CorrelationId.Should().Be("corr-old");
+        read[1].PartitionKey.Should().BeEmpty();
+
+        (await store.AppendAndPublishAsync(Name, expectedLength: 1, AggregateId, [Event("stale", "t.new")]))
+            .Should().BeNull("the stream is two long, whatever shape its entries are");
     }
 
     /// <summary>An append of nothing is refused: there is no state change and nothing to announce.</summary>
@@ -260,5 +329,25 @@ public sealed class StreamStoreTests(RedisStreamsFixture fixture)
         await act.Should().ThrowAsync<ArgumentException>();
     }
 
-    private static StateEvent Event(string body, string type) => new(Encoding.UTF8.GetBytes(body), type);
+    private static readonly PublishOptions WithMetadata = new(
+        CorrelationId: "corr-0f4a1c",
+        Headers: [new KeyValuePair<string, string>("es-version", "1")]);
+
+    private static StateEvent Event(string body, string type, PublishOptions options = default)
+        => new(Encoding.UTF8.GetBytes(body), type, options);
+
+    /// <summary>The single entry the append published to partition 0 of the topic, decoded.</summary>
+    private async Task<StreamMsg> PublishedEntry(string topic)
+    {
+        var entries = await fixture.Db.StreamRangeAsync(StreamKeys.Stream(topic, 0), count: null);
+        return EntryCodec.Decode(entries.Single(), partition: 0);
+    }
+
+    /// <summary>An ambient W3C activity, so the store has a <c>traceparent</c> to stamp.</summary>
+    private static Activity TracedActivity()
+    {
+        var activity = new Activity("state-store-test");
+        activity.SetIdFormat(ActivityIdFormat.W3C);
+        return activity.Start();
+    }
 }

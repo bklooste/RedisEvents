@@ -31,12 +31,14 @@ namespace RedisEvents.EventSourcing;
 /// the page size.
 /// </para>
 /// <para>
-/// <b>Headers.</b> Every event carries <c>es-version</c>, its 1-based position in the aggregate's
-/// history, and <c>es-id</c>, a fresh <see cref="Guid"/> — the first lets a projection assert
-/// per-aggregate monotonicity or drop a stale redelivery (core is at-least-once), the second gives
-/// every event a stable identity independent of the stream id Redis assigns it. The caller's own
-/// correlation id and headers flow through unchanged; the two of ours are added to them, never
-/// instead of them.
+/// <b>Headers.</b> The repository adds none of its own: the caller's correlation id and headers flow
+/// through unchanged, and an event saved without any carries no header field at all. A projection
+/// that needs an idempotency guard or a stable identity uses the Redis stream id
+/// (<c>EventMeta.Id</c>), which is unique, increasing and identical on every redelivery — a
+/// per-event version or Guid header would cost tens of bytes on every entry to say the same thing.
+/// All of this is on the topic copy of the event; the aggregate's own stream carries only body and
+/// type unless the topic sets <c>StateMetadata</c>, because loading reads nothing else and that
+/// stream is never trimmed.
 /// </para>
 /// <para>
 /// <b>The logger is optional</b>, as it is everywhere in this library: a repository that cannot be
@@ -53,12 +55,6 @@ public sealed class RedisEventRepository : IEventRepository
     /// materialise its whole history in a single reply.
     /// </summary>
     internal const int LoadPageSize = 1000;
-
-    /// <summary>The 1-based position of an event in its aggregate's history.</summary>
-    internal const string VersionHeader = "es-version";
-
-    /// <summary>An event's own identity, independent of the stream id Redis assigns it.</summary>
-    internal const string IdHeader = "es-id";
 
     private readonly IStreamStore store;
     private readonly EventTypeRegistry registry;
@@ -199,7 +195,7 @@ public sealed class RedisEventRepository : IEventRepository
         for (var i = 0; i < events.Length; i++)
         {
             var (wireType, body) = this.registry.Encode(uncommitted[i]);
-            events[i] = new StateEvent(body, wireType, WithEventHeaders(options, expected + i + 1));
+            events[i] = new StateEvent(body, wireType, options);
         }
 
         StreamId[]? ids;
@@ -259,7 +255,7 @@ public sealed class RedisEventRepository : IEventRepository
         for (var i = 0; i < events.Length; i++)
         {
             var (wireType, body) = this.registry.Encode(uncommitted[i]);
-            events[i] = new StateEvent(body, wireType, WithEventHeaders(options, expected + i + 1));
+            events[i] = new StateEvent(body, wireType, options);
         }
 
         try
@@ -278,28 +274,5 @@ public sealed class RedisEventRepository : IEventRepository
         var newVersion = expected + events.Length;
         EventSourcingSpans.Saved(activity, newVersion, events.Length);
         return newVersion;
-    }
-
-    /// <summary>
-    /// The caller's options with this event's <c>es-version</c> and <c>es-id</c> added to — never
-    /// substituted for — whatever headers they passed.
-    /// </summary>
-    /// <param name="options">The caller's options for the save.</param>
-    /// <param name="version">The 1-based version this event becomes.</param>
-    /// <returns>The options to stamp on this one event.</returns>
-    private static PublishOptions WithEventHeaders(PublishOptions options, int version)
-    {
-        var supplied = options.Headers;
-        var headers = new List<KeyValuePair<string, string>>((supplied?.Count ?? 0) + 2);
-
-        if (supplied is not null)
-        {
-            headers.AddRange(supplied);
-        }
-
-        headers.Add(new KeyValuePair<string, string>(VersionHeader, version.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-        headers.Add(new KeyValuePair<string, string>(IdHeader, Guid.NewGuid().ToString("N")));
-
-        return options with { Headers = headers };
     }
 }

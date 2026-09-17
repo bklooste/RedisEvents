@@ -72,8 +72,9 @@ public interface IEventRepository
     /// stronger, such as <c>0</c> for "this must be a creation".
     /// </param>
     /// <param name="options">
-    /// Correlation id and headers to stamp on every event, flowed through to both copies of it. The
-    /// repository adds its own <c>es-version</c> and <c>es-id</c> headers alongside them.
+    /// Correlation id and headers to stamp on every event's topic copy, which is what projections
+    /// read; the aggregate's own stream keeps them only when the topic sets
+    /// <c>StateMetadata</c>. The repository adds no headers of its own.
     /// </param>
     /// <param name="ct">Cancellation, observed before the transaction is built.</param>
     /// <returns>
@@ -110,7 +111,8 @@ public interface IEventRepository
     /// <see cref="AggregateRoot.Version"/> advances.
     /// </param>
     /// <param name="options">
-    /// Correlation id and headers to stamp on every event, flowed through to both copies of it.
+    /// Correlation id and headers to stamp on every event's topic copy, and on the aggregate's own
+    /// stream when the topic sets <c>StateMetadata</c>.
     /// </param>
     /// <param name="ct">Cancellation, observed before the transaction is built.</param>
     /// <returns>

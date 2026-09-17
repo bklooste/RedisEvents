@@ -253,6 +253,45 @@ public sealed class TrimmingTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// An event-sourced aggregate's history is never trimmed, however aggressively its topic is: the
+    /// inline <c>MAXLEN</c> rides only on the publish half, and the retention sweep only ever touches
+    /// the topic's partition streams. A trimmed history would silently shift every later version check.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_trimming_topic_never_trims_its_state_streams()
+    {
+        const string Name = "es:Wallet:w-1";
+
+        var topic = fixture.NewTopic();
+        var options = new TopicOptions { Partitions = 1, MaxLen = 2, Trim = TrimMode.Exact, RetentionSeconds = 1_800 };
+
+        await using var provider = this.Provider(topic, options);
+        var db = provider.Connection.GetDatabase();
+        var stateKey = Outbox.StateKey(topic, Name);
+
+        // An hour-old history, well past the retention window, as a long-lived aggregate's would be.
+        _ = await WriteDatedEntriesAsync(db, stateKey, DateTimeOffset.UtcNow.AddHours(-1), 10);
+
+        var store = new StreamStore(db, topic, options);
+        var events = Enumerable.Range(0, 5)
+            .Select(i => new StateEvent(Encoding.UTF8.GetBytes($"e{i}"), "wallet.credited"))
+            .ToArray();
+
+        (await store.AppendAndPublishAsync(Name, expectedLength: 10, "w-1", events)).Should().NotBeNull();
+
+        (await this.LengthAsync(topic)).Should().Be(2L, "the publish half is trimmed inline to MaxLen");
+        (await db.StreamLengthAsync(stateKey)).Should().Be(15L, "the state half carries no MAXLEN");
+
+        await using var trimmer = new BackgroundTrimmer(this.RootOptions(topic, options), provider.Connection, new CapturingLogger());
+        _ = await trimmer.TrimTopicOnceAsync(topic);
+
+        (await db.StreamLengthAsync(stateKey)).Should().Be(15L, "the retention sweep never touches a state stream");
+        (await store.AppendAndPublishAsync(Name, expectedLength: 15, "w-1", events))
+            .Should().NotBeNull("the history's length is still its version");
+    }
+
+    /// <summary>
     /// R-26. The trimmer runs because the <b>generic host</b> started it — not because a test
     /// constructed one.
     /// </summary>

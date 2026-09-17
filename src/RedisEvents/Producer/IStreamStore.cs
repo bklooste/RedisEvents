@@ -57,7 +57,9 @@ public interface IStreamStore
     /// <param name="max">The maximum number of entries to return. A short page means the end of the stream.</param>
     /// <param name="ct">Cancellation, observed before the command is issued.</param>
     /// <returns>
-    /// The decoded entries in stream order, or an empty list when there are none. A missing stream
+    /// The decoded entries in stream order, or an empty list when there are none. An entry's
+    /// <see cref="StreamMsg.PartitionKey"/> is empty, and its correlation id, trace and headers are
+    /// present only if <see cref="Config.TopicOptions.StateMetadata"/> was set when it was written. A missing stream
     /// reads as empty — "no such aggregate" and "an aggregate with no events" are the same thing.
     /// <para>
     /// Unlike the consumer's batches, these bodies do not alias a pooled buffer: each one owns its
@@ -99,9 +101,11 @@ public interface IStreamStore
     /// <c>0</c> creates the stream.
     /// </param>
     /// <param name="partitionKey">
-    /// The routing key for the topic publishes, and the key stamped on both copies of every event.
-    /// One state stream should always use one key — the aggregate's id — so that all of its events
-    /// land on one partition and stay ordered for the projection side.
+    /// The routing key for the topic publishes, and the key stamped on the topic copy of every event.
+    /// It is not written on the state copy — the state stream's name already identifies it — so a
+    /// <see cref="ReadAsync"/> reports it empty. One state stream should always use one key — the
+    /// aggregate's id — so that all of its events land on one partition and stay ordered for the
+    /// projection side.
     /// </param>
     /// <param name="events">
     /// The events, appended and published in this order. Must not be empty: a transaction that
@@ -140,7 +144,7 @@ public interface IStreamStore
     /// </remarks>
     /// <param name="name">The state stream's name, as in <see cref="ReadAsync"/>.</param>
     /// <param name="partitionKey">
-    /// The routing key for the topic publishes, and the key stamped on both copies of every event.
+    /// The routing key for the topic publishes, and the key stamped on the topic copy of every event.
     /// </param>
     /// <param name="events">
     /// The events, appended and published in this order. Must not be empty: a transaction that

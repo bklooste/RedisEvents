@@ -16,17 +16,24 @@ namespace RedisEvents.Producer;
 /// <code>
 /// WATCH {topic}:state:&lt;name&gt;        (from Condition.StreamLengthEqual)
 /// MULTI
-///   XADD {topic}:state:&lt;name&gt; * b .. t .. k ..     ← the state stream, no MAXLEN, ever
-///   XADD {topic}:state:&lt;name&gt; * b .. t .. k ..
+///   XADD {topic}:state:&lt;name&gt; * b .. t ..          ← the state stream, no MAXLEN, ever
+///   XADD {topic}:state:&lt;name&gt; * b .. t ..
 ///   XADD s:{topic}:&lt;p&gt; MAXLEN ~ n * b .. t .. k ..  ← the topic, trimmed like any publish
 ///   XADD s:{topic}:&lt;p&gt; MAXLEN ~ n * b .. t .. k ..
 /// EXEC
 /// </code>
 /// built through <see cref="Outbox.WriteAndPublishManyAsync"/> so the publish half cannot drift from
-/// the plain publisher's on routing, trimming or the wire format, and through
-/// <see cref="EntryCodec"/> on both halves so a state entry and its topic entry are the same bytes
-/// under different ids — the aggregate's history and the projection feed can never disagree about
-/// what an event was.
+/// the plain publisher's on routing, trimming or the wire format. Both halves carry the same body and
+/// type, so the aggregate's history and the projection feed can never disagree about what an event
+/// was.
+/// </para>
+/// <para>
+/// <b>The state half is leaner than the topic half.</b> A state entry is written by
+/// <see cref="EntryCodec.EncodeState"/>: no <c>k</c> — the state stream's name already is the
+/// aggregate — and no correlation id, <c>traceparent</c> or headers unless
+/// <see cref="TopicOptions.StateMetadata"/> is set. Loading an aggregate reads only body and type, and
+/// a state stream is never trimmed, so every per-entry byte it does not need is paid for forever. The
+/// topic half keeps everything: that is what projections and consumers read.
 /// </para>
 /// <para>
 /// <b>The state appends are queued inside the outbox's <c>stateWrites</c> callback</b>, which is
@@ -216,7 +223,7 @@ internal sealed class StreamStore : IStreamStore
 
                         appended[i] = tran.StreamAddAsync(
                             key,
-                            EntryCodec.Encode(e.Body, e.Type, partitionKey, e.Options.CorrelationId, traceParent, e.Options.Headers),
+                            this.EncodeState(e, traceParent),
                             messageId: null,
 
                             // No MAXLEN, and no way to ask for one: a trimmed state stream's length
@@ -310,7 +317,7 @@ internal sealed class StreamStore : IStreamStore
 
                     appended[i] = tran.StreamAddAsync(
                         key,
-                        EntryCodec.Encode(e.Body, e.Type, partitionKey, e.Options.CorrelationId, traceParent, e.Options.Headers),
+                        this.EncodeState(e, traceParent),
                         messageId: null,
                         maxLength: null,
                         useApproximateMaxLength: false,
@@ -334,12 +341,21 @@ internal sealed class StreamStore : IStreamStore
         return ids;
     }
 
+    /// <summary>
+    /// The state-stream copy of one event: body and type, plus the event's metadata only when
+    /// <see cref="TopicOptions.StateMetadata"/> asks for it. Never the partition key.
+    /// </summary>
+    private NameValueEntry[] EncodeState(in StateEvent e, string? traceParent)
+        => this.Options.StateMetadata
+            ? EntryCodec.EncodeState(e.Body, e.Type, e.Options.CorrelationId, traceParent, e.Options.Headers)
+            : EntryCodec.EncodeState(e.Body, e.Type);
+
     /// <summary>The exclusive-range form of an id: <c>(&lt;ms&gt;-&lt;seq&gt;</c>.</summary>
     private static RedisValue Exclusive(StreamId after) => "(" + after.Format();
 
     /// <summary>
-    /// The ambient W3C <c>traceparent</c>, stamped on both copies of every event so the state entry
-    /// and its topic entry are byte-identical. Non-W3C activity ids are skipped rather than written
+    /// The ambient W3C <c>traceparent</c>, stamped on the topic copy of every event and on the state
+    /// copy when <see cref="TopicOptions.StateMetadata"/> is set. Non-W3C activity ids are skipped rather than written
     /// as a header nobody can parse — the same rule <see cref="Outbox"/> applies to the publish half.
     /// </summary>
     private static string? CurrentTraceParent()
