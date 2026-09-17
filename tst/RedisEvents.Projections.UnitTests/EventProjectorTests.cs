@@ -43,7 +43,7 @@ public class EventProjectorTests
     [Trait("TestType", "UnitTest")]
     public async Task A_message_with_no_headers_at_all_projects_without_error()
     {
-        // No es-version, no anything: the projector depends only on a StreamMsg's ordinary fields
+        // No custom headers at all: the projector depends only on a StreamMsg's ordinary fields
         // (Type, Body, PartitionKey, Id, CorrelationId) and nothing an event store specifically stamps
         // — a plain publisher that never heard of AddEventStore projects exactly the same way.
         var registry = new EventTypeRegistry().RegisterJson("event.a", EventProjectorTestsJson.Default.EventA);

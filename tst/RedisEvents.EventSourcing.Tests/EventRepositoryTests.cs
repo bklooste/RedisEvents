@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json.Serialization;
 
 using FluentAssertions;
@@ -274,14 +273,14 @@ public sealed class EventRepositoryTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
-    /// The saved events are on the topic too, in order, each stamped with its 1-based
-    /// <c>es-version</c> — that is the projection feed, and it is in the same transaction as the
-    /// append, so it can neither lag nor be lost. The caller's correlation id and headers ride along
-    /// with ours rather than being replaced by them.
+    /// The saved events are on the topic too, in order — that is the projection feed, and it is in the
+    /// same transaction as the append, so it can neither lag nor be lost. The caller's correlation id
+    /// and headers ride along untouched, and the repository adds none of its own: a save with no
+    /// options writes no header field at all.
     /// </summary>
     [Fact]
     [Trait("TestType", "ServiceTest")]
-    public async Task Save_publishes_every_event_to_the_topic_with_an_ascending_version_header()
+    public async Task Save_publishes_every_event_to_the_topic_in_order_with_only_the_callers_headers()
     {
         var (repository, topic, _) = this.Repository();
 
@@ -304,18 +303,21 @@ public sealed class EventRepositoryTests(RedisStreamsFixture fixture)
         published.Should().HaveCount(4);
         published.Select(m => m.PartitionKey).Should().AllBe("w-6", "the aggregate id routes every event to one partition");
 
-        var versions = published.Select(Version).ToArray();
-        versions.Should().Equal(new[] { 1, 2, 3, 4 }, "es-version is 1-based and continues across saves");
-
-        var ids = published.Select(m => Header(m, "es-id")).ToArray();
-        ids.Should().OnlyHaveUniqueItems("every event gets an identity of its own");
+        published.Select(m => m.Type).Should().Equal(
+            new[] { "widget.created", "widget.renamed", "widget.ticked", "widget.ticked" },
+            "events are published in the order they were raised, across saves");
+        published.Select(m => m.Id).Should().BeInAscendingOrder();
 
         // The caller's metadata flowed through on the events of the save it was passed to.
         published.Take(3).Should().AllSatisfy(m =>
         {
             m.CorrelationId.Should().Be("corr-e2f9");
             Header(m, "tenant").Should().Be("acme");
+            m.Headers.ToDictionary().Keys.Should().Equal(new[] { "tenant" }, "the repository adds no headers of its own");
         });
+
+        // The save without options carries nothing the caller did not ask for.
+        published[3].Headers.IsEmpty.Should().BeTrue("no caller headers means no header field at all");
 
         // The aggregate's own history holds the same events, but only what loading reads: the
         // version is its position, so it needs no header, and no key, trace or correlation id.
@@ -429,13 +431,9 @@ public sealed class EventRepositoryTests(RedisStreamsFixture fixture)
         .RegisterJson("widget.renamed", WidgetJson.Default.WidgetRenamed)
         .RegisterJson("widget.ticked", WidgetJson.Default.WidgetTicked);
 
-    /// <summary>The <c>es-version</c> header as a number, which is what "in order" is asserted on.</summary>
-    private static int Version(StreamMsg message)
-        => int.Parse(Header(message, "es-version"), CultureInfo.InvariantCulture);
-
     private static string Header(StreamMsg message, string key)
     {
-        message.Headers.TryGetValue(key, out var value).Should().BeTrue($"'{key}' must be stamped on every event");
+        message.Headers.TryGetValue(key, out var value).Should().BeTrue($"'{key}' must be present");
         return value;
     }
 

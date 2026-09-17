@@ -6,6 +6,17 @@ actually changed.
 
 ## 2026-09-18
 
+### Changed — breaking (wire)
+
+- **`IEventRepository.SaveAsync` no longer stamps `es-version` or `es-id` headers.** Nothing in the
+  library read either one, yet together they cost 58 packed bytes on every published event. They also
+  forced an `h` field onto events that would otherwise have none, and a `Guid` plus a header list on
+  every save. Events now carry only the caller's correlation id and headers; a save with no options
+  writes no header field at all.
+  - Migration: a consumer that read `es-version` or `es-id` should use `EventMeta.Id` (the Redis
+    stream id: unique, increasing, identical on every redelivery) as an idempotency guard or an
+    event identity. A producer that needs a per-event version can pass it in `PublishOptions.Headers`.
+
 ### Changed
 
 - **State-stream entries are now body and type only.** `IStreamStore.AppendAndPublishAsync` (and so

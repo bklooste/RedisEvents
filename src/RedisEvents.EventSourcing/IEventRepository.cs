@@ -74,8 +74,7 @@ public interface IEventRepository
     /// <param name="options">
     /// Correlation id and headers to stamp on every event's topic copy, which is what projections
     /// read; the aggregate's own stream keeps them only when the topic sets
-    /// <c>StateMetadata</c>. The repository adds its own <c>es-version</c> and <c>es-id</c> headers
-    /// alongside them.
+    /// <c>StateMetadata</c>. The repository adds no headers of its own.
     /// </param>
     /// <param name="ct">Cancellation, observed before the transaction is built.</param>
     /// <returns>

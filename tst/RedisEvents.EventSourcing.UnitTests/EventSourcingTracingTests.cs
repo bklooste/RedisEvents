@@ -190,7 +190,7 @@ public class EventSourcingTracingTests
 
     private static string? Tag(Activity span, string name) => span.GetTagItem(name)?.ToString();
 
-    /// <summary>A history entry for <see cref="RedisEventRepository.LoadAsync{TAggregate}"/> — no <c>es-version</c> header needed; that header is <see cref="EventProjector"/>'s concern, not the repository's.</summary>
+    /// <summary>A history entry for <see cref="RedisEventRepository.LoadAsync{TAggregate}"/>: body and type are all loading reads.</summary>
     private static StreamMsg HistoryMsg(string aggregateId, int version) => new(
         Body: System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new Touched(aggregateId), TracedThingJson.Default.Touched),
         Type: "touched",
