@@ -27,12 +27,20 @@ namespace RedisEvents.Extensions;
 /// <see cref="TypedBatchHandlerAdapter{T}"/> — before <c>StreamConsumerHost.ResolveHandler</c>'s
 /// existing kind switch ever runs, so that switch never needs to know typed handlers exist.
 /// </param>
+/// <param name="HandlerServiceKey">
+/// Set only by the keyed <c>AddStream&lt;THandler&gt;(topic, serviceKey)</c> overload. When set,
+/// <c>HandlerType</c> is resolved as a keyed service under this key instead of a plain singleton —
+/// so two registrations for the same <paramref name="HandlerType"/> on different topics each get
+/// their own instance instead of colliding on .NET DI's last-registration-wins rule for a plain
+/// singleton. <see langword="null"/> resolves <paramref name="HandlerType"/> unkeyed, as before.
+/// </param>
 internal sealed record StreamConsumerRegistration(
     ConsumerOptions Options,
     string Consumer,
     Type? HandlerType,
     Func<ReadOnlyMemory<StreamMsg>, CancellationToken, ValueTask>? Handler,
-    Func<object, object>? WrapAsTypedHandler = null);
+    Func<object, object>? WrapAsTypedHandler = null,
+    object? HandlerServiceKey = null);
 
 /// <summary>
 /// One publisher declared by an <c>AddStreamPublisher</c> call.
@@ -166,6 +174,48 @@ public static class StreamsBuilderExtensions
 
         builder.Services.AddSingleton<THandler>();
         return Register(builder, options, consumer, typeof(THandler), handler: null);
+    }
+
+    /// <summary>
+    /// Zero-config registration, keyed variant: consume <paramref name="topic"/> with
+    /// <typeparamref name="THandler"/>, resolved as the keyed service registered under
+    /// <paramref name="serviceKey"/> rather than a plain singleton.
+    /// </summary>
+    /// <remarks>
+    /// Use this instead of <see cref="AddStream{THandler}(IHostApplicationBuilder, string)"/> when the
+    /// same <typeparamref name="THandler"/> type is registered for more than one topic on this builder
+    /// (as <c>RedisEvents.Projections</c>' <c>AddEventProjector</c> does for every topic it projects,
+    /// always with the concrete type <c>EventProjector</c>). A plain <c>AddSingleton&lt;THandler&gt;</c>
+    /// per topic collides: .NET DI resolves the *last* registration for a given service type, so every
+    /// earlier topic's consumer would silently run the last topic's handler instance instead of its
+    /// own — decoding nothing it recognises, filtering every message, never erroring. Caller registers
+    /// the real instance itself, keyed: <c>builder.Services.AddKeyedSingleton(serviceKey, ...)</c>.
+    /// </remarks>
+    /// <typeparam name="THandler">The handler class; resolved as a keyed singleton.</typeparam>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="topic">The topic to consume.</param>
+    /// <param name="serviceKey">
+    /// The key <typeparamref name="THandler"/> is registered under, e.g. via
+    /// <c>AddKeyedSingleton&lt;THandler&gt;(serviceKey, ...)</c>. The topic string itself is a natural
+    /// choice when one topic needs at most one instance of <typeparamref name="THandler"/>.
+    /// </param>
+    /// <returns>The builder, for chaining.</returns>
+    public static IHostApplicationBuilder AddStream<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] THandler>(
+        this IHostApplicationBuilder builder,
+        string topic,
+        object serviceKey)
+        where THandler : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(topic);
+        ArgumentNullException.ThrowIfNull(serviceKey);
+
+        var options = Core(builder);
+        var consumer = FindByTopic(options, topic) ?? new ConsumerOptions { Topic = topic };
+
+        // No bare AddSingleton<THandler>() here — unlike the unkeyed overload, there is nothing to
+        // override later. The caller registers the one real keyed instance itself, after this call.
+        return Register(builder, options, consumer, typeof(THandler), handler: null, handlerServiceKey: serviceKey);
     }
 
     /// <summary>
@@ -772,10 +822,11 @@ public static class StreamsBuilderExtensions
         ConsumerOptions consumer,
         Type? handlerType,
         Func<ReadOnlyMemory<StreamMsg>, CancellationToken, ValueTask>? handler,
-        Func<object, object>? wrapAsTypedHandler = null)
+        Func<object, object>? wrapAsTypedHandler = null,
+        object? handlerServiceKey = null)
     {
         var name = StreamConfigBinder.ResolveConsumerName(options, consumer);
-        var registration = new StreamConsumerRegistration(consumer, name, handlerType, handler, wrapAsTypedHandler);
+        var registration = new StreamConsumerRegistration(consumer, name, handlerType, handler, wrapAsTypedHandler, handlerServiceKey);
         Registry(builder).Add(registration);
 
         // One StreamConsumerHost per registration. It owns its partition workers, its position store

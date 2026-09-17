@@ -173,16 +173,17 @@ public static class ProjectionsBuilderExtensions
     /// </exception>
     /// <remarks>
     /// <para>
-    /// <b>How the projector gets built without a live <see cref="IServiceProvider"/> to hand it.</b>
-    /// <c>AddStream&lt;EventProjector&gt;(topic)</c> is called first — it bare-registers
-    /// <c>AddSingleton&lt;EventProjector&gt;()</c> (which cannot actually construct one; nothing here
-    /// asks it to) and wires the consumer host to resolve <c>typeof(EventProjector)</c> from the
-    /// container once it is built. A second, real registration is added immediately after with the
-    /// constructor arguments this projector actually needs; because the last registration for a
-    /// service type is the one <see cref="IServiceProvider"/> returns, that is the one the consumer
-    /// host gets. This uses only <c>Microsoft.Extensions.DependencyInjection</c>'s documented
-    /// last-registration-wins behaviour and core's existing public <c>AddStream&lt;THandler&gt;</c>
-    /// overload — no internals of either are touched.
+    /// <b>How the projector gets built without a live <see cref="IServiceProvider"/> to hand it, and
+    /// why it is keyed by <paramref name="topic"/>.</b> A service that projects more than one topic
+    /// calls this more than once, always with the same concrete handler type, <c>EventProjector</c>.
+    /// Core's plain <c>AddStream&lt;EventProjector&gt;(topic)</c> resolves that type unkeyed, and
+    /// <see cref="IServiceProvider"/> returns the *last* registration for a given service type — so
+    /// every topic but the last-registered one would silently run with the last topic's
+    /// <see cref="EventTypeRegistry"/> and projection list, decoding nothing on its own topic,
+    /// filtering every message, never erroring. The keyed overload,
+    /// <c>AddStream&lt;EventProjector&gt;(topic, topic)</c> — the topic string doubling as its own
+    /// key — resolves each topic's <c>EventProjector</c> independently instead. The real instance is
+    /// registered right after with <c>AddKeyedSingleton</c>, keyed the same way.
     /// </para>
     /// <para>
     /// Every <c>AddProjection</c> call on the builder — class-based or delegate-based — is available
@@ -205,15 +206,16 @@ public static class ProjectionsBuilderExtensions
         var projectionTypes = ProjectionTypesRegistry(builder);
         var projectionFactories = ProjectionFactoriesRegistry(builder);
 
-        // The bare, non-functional registration — see the <remarks> above.
-        builder.AddStream<EventProjector>(topic);
+        // Keyed by topic — see the <remarks> above for why an unkeyed registration is wrong here.
+        builder.AddStream<EventProjector>(topic, topic);
 
-        // The real one. Registered after, so it is the one actually resolved. Class-based projections
-        // (AddProjection<TProjection>) and delegate-based ones (AddProjection<TEvent>(handler)) are two
-        // separate lists on the builder — see ProjectionTypes/ProjectionFactories — combined here into
-        // the one flat list EventProjector dispatches through; it does not care which source built any
-        // given instance.
-        builder.Services.AddSingleton(sp => new EventProjector(
+        // Class-based projections (AddProjection<TProjection>) and delegate-based ones
+        // (AddProjection<TEvent>(handler)) are two separate lists on the builder — see
+        // ProjectionTypes/ProjectionFactories — combined here into the one flat list this topic's
+        // EventProjector dispatches through; it does not care which source built any given instance.
+        // Every topic's EventProjector gets the full combined list, and each only ever matches events
+        // its own EventTypeRegistry (looked up by this same topic key) can decode.
+        builder.Services.AddKeyedSingleton(topic, (sp, _) => new EventProjector(
             sp.GetRequiredKeyedService<EventTypeRegistry>(topic),
             [.. projectionTypes.Types.Select(sp.GetRequiredService), .. projectionFactories.Factories.Select(f => f(sp))],
             sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents.Projections")));
