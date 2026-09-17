@@ -106,10 +106,10 @@ public partial class EventSourcingRegistrationTests
     }
 
     /// <summary>
-    /// The critical wiring proof: resolving the projector must run the REAL factory, not the bare
-    /// <c>AddSingleton&lt;EventProjector&gt;()</c> that <c>AddStream&lt;EventProjector&gt;</c>
-    /// registers first — the bare one cannot construct anything (its constructor needs a decoded
-    /// projection list DI has no way to supply) and would throw if it were the one resolved.
+    /// The critical wiring proof: resolving the projector must run the REAL factory — registered
+    /// keyed by topic via <c>AddKeyedSingleton</c>, not the plain <c>AddSingleton&lt;EventProjector&gt;()</c>
+    /// core's <c>AddStream&lt;EventProjector&gt;(topic, topic)</c> would otherwise leave unresolvable
+    /// (its constructor needs a decoded projection list DI has no way to supply on its own).
     /// </summary>
     [Fact]
     [Trait("TestType", "UnitTest")]
@@ -121,7 +121,7 @@ public partial class EventSourcingRegistrationTests
 
         using var host = builder.Build();
 
-        var projector = host.Services.GetRequiredService<EventProjector>();
+        var projector = host.Services.GetRequiredKeyedService<EventProjector>("inventory");
         projector.Should().NotBeNull();
     }
 
@@ -155,7 +155,37 @@ public partial class EventSourcingRegistrationTests
         using var host = builder.Build();
 
         calls.Should().Be(1);
-        host.Services.GetRequiredService<EventProjector>().Should().NotBeNull();
+        host.Services.GetRequiredKeyedService<EventProjector>("inventory").Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// The exact production bug this fix closes: a service projecting two topics (bet-openbets'
+    /// real shape — one <c>AddEventProjector</c> call per topic, always the same concrete handler
+    /// type) must get each topic its own <see cref="EventProjector"/>, not have the second
+    /// registration silently override the first for every resolution — which is what a plain
+    /// <c>AddSingleton&lt;EventProjector&gt;</c> per call would do, per .NET DI's documented
+    /// last-registration-wins rule for an unkeyed service type.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void AddEventProjector_twoTopics_eachResolvesItsOwnDistinctProjector()
+    {
+        var builder = Builder();
+        builder.AddEventProjector("inventory", RegisterWidget);
+        builder.AddEventProjector("orders", RegisterWidget);
+        builder.AddProjection<SpyProjection>();
+
+        using var host = builder.Build();
+
+        var inventoryProjector = host.Services.GetRequiredKeyedService<EventProjector>("inventory");
+        var ordersProjector = host.Services.GetRequiredKeyedService<EventProjector>("orders");
+
+        inventoryProjector.Should().NotBeNull();
+        ordersProjector.Should().NotBeNull();
+        inventoryProjector.Should().NotBeSameAs(ordersProjector,
+            "each topic must resolve its own EventProjector, built from its own EventTypeRegistry — " +
+            "sharing one instance is exactly the bug where the last-registered topic silently wins " +
+            "for every topic's stream consumer");
     }
 
     /// <summary>A projector with no registry and no <c>events</c> argument fails at call time, not lazily.</summary>

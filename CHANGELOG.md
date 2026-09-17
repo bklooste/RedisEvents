@@ -4,6 +4,26 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-17
+
+### Fixed
+
+- **`AddEventProjector` for a second topic on the same builder silently broke the first.** It
+  registered `EventProjector` as a plain `AddSingleton`, so a service calling it more than once (one
+  `AddEventProjector` per topic it projects — the documented, intended usage) collided on .NET DI's
+  last-registration-wins rule for an unkeyed service type: every topic's stream consumer resolved
+  `EventProjector` unkeyed and got the *same* instance — whichever topic's registration ran last, with
+  its `EventTypeRegistry` and projection list. Every earlier topic's messages then decoded against the
+  wrong registry, matched nothing, and were silently skipped: position advanced, nothing logged, no
+  error — because "an unrecognised wire type" is legitimately not a fault (see `EventProjector`'s own
+  remarks). Found via a real instance: a service projecting two topics had zero writes reach its read
+  view for one of them, with a fully caught-up consumer position and not a single error line.
+  `AddEventProjector` now registers `EventProjector` **keyed by topic** (`AddKeyedSingleton`, the same
+  pattern `EventTypeRegistry` already used), via a new keyed `AddStream<THandler>(topic, serviceKey)`
+  overload in core that `StreamConsumerHost` resolves through `GetRequiredKeyedService` when a
+  registration carries a key. A service projecting exactly one topic is unaffected either way; a
+  service projecting more than one now gets each its own correctly-wired projector.
+
 ## 2026-09-15
 
 ### Added

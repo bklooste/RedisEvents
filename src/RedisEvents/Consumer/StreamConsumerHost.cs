@@ -251,8 +251,14 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 "with neither a handler class nor a handler delegate.");
         }
 
-        // Resolved once, here — not per batch, and certainly not per message.
-        var instance = services.GetRequiredService(handlerType);
+        // Resolved once, here — not per batch, and certainly not per message. Keyed when the
+        // registration carries a key (see StreamConsumerRegistration.HandlerServiceKey) — required
+        // whenever the same handlerType is registered for more than one topic on this builder, since
+        // a plain GetRequiredService would return whichever topic's AddSingleton ran last for every
+        // topic, not each topic's own instance.
+        var instance = registration.HandlerServiceKey is { } serviceKey
+            ? services.GetRequiredKeyedService(handlerType, serviceKey)
+            : services.GetRequiredService(handlerType);
 
         // Set only by the typed AddStream<THandler, TMessage> overloads: turns the resolved instance
         // into a plain IBatchHandler/IMessageHandler wrapper before the switch below ever runs, so
