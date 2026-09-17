@@ -317,12 +317,19 @@ public sealed class EventRepositoryTests(RedisStreamsFixture fixture)
             Header(m, "tenant").Should().Be("acme");
         });
 
-        // And the aggregate's own history carries the same headers, entry for entry.
+        // The aggregate's own history holds the same events, but only what loading reads: the
+        // version is its position, so it needs no header, and no key, trace or correlation id.
         var store = new StreamStore(fixture.Db, topic, Options);
         var history = await store.ReadAsync(RedisEventRepository.StreamName("TestWidget", "w-6"), StreamId.Min, max: 100);
 
         history.Should().HaveCount(4);
-        history.Select(Version).Should().Equal(1, 2, 3, 4);
+        history.Select(m => m.Type).Should().Equal(published.Select(m => m.Type));
+        history.Should().AllSatisfy(m =>
+        {
+            m.PartitionKey.Should().BeEmpty();
+            m.CorrelationId.Should().BeEmpty();
+            m.Headers.IsEmpty.Should().BeTrue();
+        });
     }
 
     /// <summary>

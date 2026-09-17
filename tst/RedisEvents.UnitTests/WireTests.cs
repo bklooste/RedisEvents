@@ -230,6 +230,61 @@ public class WireTests
 
     [Fact]
     [Trait("TestType", "UnitTest")]
+    public void EntryCodec_EncodeState_WritesOnlyBodyAndType()
+    {
+        var entries = EntryCodec.EncodeState(Encoding.UTF8.GetBytes("x"), type: "T");
+
+        entries.Select(e => (string?)e.Name).Should().Equal(EntryCodec.BodyField, EntryCodec.TypeField);
+    }
+
+    /// <summary>
+    /// With metadata, a state entry carries everything a topic entry does except the partition key.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void EntryCodec_EncodeState_WithMetadata_NeverWritesPartitionKey()
+    {
+        const string TraceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+        var entries = EntryCodec.EncodeState(
+            Encoding.UTF8.GetBytes("x"),
+            "T",
+            correlationId: "corr-7",
+            traceParent: TraceParent,
+            headers: [new KeyValuePair<string, string>("es-version", "3")]);
+
+        entries.Select(e => (string?)e.Name).Should().Equal(
+            EntryCodec.BodyField, EntryCodec.TypeField, EntryCodec.CorrelationIdField, EntryCodec.TraceParentField, EntryCodec.HeadersField);
+
+        var msg = EntryCodec.Decode(StreamId.Min, entries, partition: 0);
+        msg.PartitionKey.Should().BeEmpty();
+        msg.CorrelationId.Should().Be("corr-7");
+        msg.TraceParent.Should().Be(TraceParent);
+        msg.Headers.GetValueOrDefault("es-version").Should().Be("3");
+    }
+
+    /// <summary>
+    /// A lean state entry is still codec version 1: it decodes under the same version as a full one,
+    /// with the absent fields reading as empty.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void EntryCodec_EncodeState_DecodesUnderTheCurrentCodecVersion()
+    {
+        var entries = EntryCodec.EncodeState(Encoding.UTF8.GetBytes("body"), "T");
+
+        var msg = EntryCodec.Decode(new StreamId(4, 2), entries, partition: 0, EntryCodec.CodecVersion);
+
+        Encoding.UTF8.GetString(msg.BodySpan).Should().Be("body");
+        msg.Type.Should().Be("T");
+        msg.PartitionKey.Should().BeEmpty();
+        msg.CorrelationId.Should().BeEmpty();
+        msg.TraceParent.Should().BeNull();
+        msg.Headers.IsEmpty.Should().BeTrue();
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
     public void EntryCodec_EmptyBody_RoundTrips()
     {
         var entries = EntryCodec.Encode(ReadOnlyMemory<byte>.Empty, type: "T");

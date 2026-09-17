@@ -16,7 +16,7 @@ namespace RedisEvents.Wire;
 ///   <listheader><term>Field</term><description>Meaning</description></listheader>
 ///   <item><term><c>b</c></term><description>body, raw bytes — always present</description></item>
 ///   <item><term><c>t</c></term><description>message type string — always present</description></item>
-///   <item><term><c>k</c></term><description>partition key — always present, may be empty</description></item>
+///   <item><term><c>k</c></term><description>partition key — always present on a topic entry, may be empty; never on a state entry</description></item>
 ///   <item><term><c>c</c></term><description>correlation id — optional</description></item>
 ///   <item><term><c>p</c></term><description>W3C <c>traceparent</c> — optional</description></item>
 ///   <item><term><c>h</c></term><description>packed custom headers — optional</description></item>
@@ -24,6 +24,13 @@ namespace RedisEvents.Wire;
 /// <para>
 /// There is no envelope and no timestamp field. The body is the publisher's bytes verbatim, and the
 /// enqueue time comes out of the stream id's millisecond component — the broker's clock, free.
+/// </para>
+/// <para>
+/// <b>State entries are leaner.</b> <see cref="EncodeState"/> writes the copy of an event that goes on
+/// a state stream: <c>b</c> and <c>t</c>, plus <c>c</c>/<c>p</c>/<c>h</c> only when the topic asks
+/// for them, and never <c>k</c>. Every field but <c>b</c> and <c>t</c> is already optional to
+/// <see cref="Decode(in StreamEntry, int, int)"/>, so this is the same codec version and a stream
+/// holding both shapes reads fine.
 /// </para>
 /// <para>
 /// Decoding allocates only the strings the shape of <see cref="StreamMsg"/> forces: the body aliases
@@ -89,12 +96,45 @@ internal static class EntryCodec
         string? correlationId = null,
         string? traceParent = null,
         IReadOnlyList<KeyValuePair<string, string>>? headers = null)
+        => Encode(body, type, withPartitionKey: true, partitionKey, correlationId, traceParent, headers);
+
+    /// <summary>
+    /// Builds the field set for an <c>XADD</c> to a state stream: no <c>k</c>, ever.
+    /// </summary>
+    /// <remarks>
+    /// A state stream belongs to one aggregate and its name already says which, so a partition key
+    /// on every entry is the same bytes repeated forever on a stream that is never trimmed. Pass the
+    /// optional metadata only when the topic keeps it on state entries
+    /// (<see cref="Config.TopicOptions.StateMetadata"/>); with none, an entry is just <c>b</c> and <c>t</c>.
+    /// </remarks>
+    /// <param name="body">The event body. Passed to Redis by reference — not copied.</param>
+    /// <param name="type">The event type string.</param>
+    /// <param name="correlationId">Optional correlation id.</param>
+    /// <param name="traceParent">Optional W3C <c>traceparent</c>.</param>
+    /// <param name="headers">Optional custom headers, packed into one field.</param>
+    /// <exception cref="ArgumentException">The headers breach the <see cref="HeaderBlock"/> caps.</exception>
+    public static NameValueEntry[] EncodeState(
+        ReadOnlyMemory<byte> body,
+        string type,
+        string? correlationId = null,
+        string? traceParent = null,
+        IReadOnlyList<KeyValuePair<string, string>>? headers = null)
+        => Encode(body, type, withPartitionKey: false, partitionKey: null, correlationId, traceParent, headers);
+
+    private static NameValueEntry[] Encode(
+        ReadOnlyMemory<byte> body,
+        string type,
+        bool withPartitionKey,
+        string? partitionKey,
+        string? correlationId,
+        string? traceParent,
+        IReadOnlyList<KeyValuePair<string, string>>? headers)
     {
         ArgumentNullException.ThrowIfNull(type);
 
         var packed = HeaderBlock.Pack(headers);
 
-        var count = 3;
+        var count = withPartitionKey ? 3 : 2;
         if (!string.IsNullOrEmpty(correlationId))
         {
             count++;
@@ -115,7 +155,11 @@ internal static class EntryCodec
 
         entries[at++] = new NameValueEntry(Body, body);
         entries[at++] = new NameValueEntry(Type, type);
-        entries[at++] = new NameValueEntry(PartitionKey, partitionKey ?? string.Empty);
+
+        if (withPartitionKey)
+        {
+            entries[at++] = new NameValueEntry(PartitionKey, partitionKey ?? string.Empty);
+        }
 
         if (!string.IsNullOrEmpty(correlationId))
         {

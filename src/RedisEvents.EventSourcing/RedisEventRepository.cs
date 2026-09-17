@@ -36,7 +36,9 @@ namespace RedisEvents.EventSourcing;
 /// per-aggregate monotonicity or drop a stale redelivery (core is at-least-once), the second gives
 /// every event a stable identity independent of the stream id Redis assigns it. The caller's own
 /// correlation id and headers flow through unchanged; the two of ours are added to them, never
-/// instead of them.
+/// instead of them. All of this is on the topic copy of the event; the aggregate's own stream carries
+/// only body and type unless the topic sets <c>StateMetadata</c>, because loading reads nothing else
+/// and that stream is never trimmed.
 /// </para>
 /// <para>
 /// <b>The logger is optional</b>, as it is everywhere in this library: a repository that cannot be

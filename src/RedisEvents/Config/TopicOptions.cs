@@ -85,6 +85,26 @@ public sealed record TopicOptions
     public bool CoLocatePartitions { get; set; } = true;
 
     /// <summary>
+    /// Whether state-stream entries written by a state store on this topic also keep the event's
+    /// correlation id, <c>traceparent</c> and headers (default: <see langword="false"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Off, a state entry is the event body and its type and nothing else — all an aggregate load
+    /// reads. The topic copy of every event keeps its full metadata either way; that is the copy
+    /// projections and consumers read. The partition key is never written on a state entry: the state
+    /// stream's name already identifies the aggregate, and a state stream is never trimmed, so a
+    /// per-entry copy would cost its bytes forever.
+    /// </para>
+    /// <para>
+    /// Turn it on to keep a permanent record of which request wrote each event (the topic copy's
+    /// trace is trimmed away with the topic). Flipping it is safe at any time: readers treat all of
+    /// these fields as optional, so one state stream can hold entries of both shapes.
+    /// </para>
+    /// </remarks>
+    public bool StateMetadata { get; set; }
+
+    /// <summary>
     /// Release the trim clamp above this fraction of MaxLen (default: 0.8).
     /// Used to prevent a stuck consumer from holding up trimming and filling the stream.
     /// </summary>

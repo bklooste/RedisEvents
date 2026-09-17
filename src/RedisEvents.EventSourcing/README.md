@@ -156,8 +156,8 @@ for the projector) in a single `MULTI`/`EXEC`:
 ```
 WATCH {topic}:state:es:Inventory:42        (the version check)
 MULTI
-  XADD {topic}:state:es:Inventory:42 * ...    ← the aggregate's own history, no MAXLEN, ever
-  XADD s:{topic}:<p> MAXLEN ~ n * ...         ← the topic, trimmed like any publish
+  XADD {topic}:state:es:Inventory:42 * b .. t ..         ← the aggregate's own history, no MAXLEN, ever
+  XADD s:{topic}:<p> MAXLEN ~ n * b .. t .. k .. h ..     ← the topic, trimmed like any publish
 EXEC
 ```
 
@@ -166,6 +166,15 @@ can enforce as a concurrency check, and it needs no second key to stay in sync. 
 invariant this package relies on and nothing in it ever violates: **an aggregate's own stream is
 never trimmed.** If something outside this package ever did, every later concurrency check would
 silently compare against the wrong number.
+
+**The aggregate's own stream holds only what loading reads.** Its entries are the event body and
+type — no partition key (the stream name already is the aggregate), and no correlation id,
+`traceparent` or headers. Because that stream is never trimmed, anything else would be paid for on
+every event forever; for small events the metadata easily outweighs the body. The topic copy keeps
+all of it, since that is what projections read. Set `Streams:Topics:<t>:StateMetadata: true` to keep
+correlation id, trace and headers on the aggregate's stream too — for example to keep a permanent
+record of which request wrote each event. It is safe to change at any time: one stream can hold
+entries of both shapes.
 
 Both writes are one transaction: a version-check failure applies neither, and a connection lost
 around `EXEC` leaves an outcome that is unknown but never torn — the aggregate's history and the
