@@ -21,8 +21,7 @@ namespace RedisEvents.UnitTests.EventSourcing;
 /// Micro-benchmarks for <c>RedisEvents.EventSourcing</c>'s own per-call cost, with no Redis anywhere
 /// in this file: a hand-rolled <see cref="FakeStreamStore"/> just appends to a list and fabricates
 /// ids, so what gets measured is exactly the package's own work — <see cref="EventTypeRegistry"/>
-/// encode, the <c>es-version</c>/<c>es-id</c> header-list building in
-/// <see cref="RedisEventRepository.SaveAsync"/>, and <see cref="EventProjector"/>'s decode-and-dispatch
+/// encode, the event building in <see cref="RedisEventRepository.SaveAsync"/>, and <see cref="EventProjector"/>'s decode-and-dispatch
 /// — never the network or a real Redis round trip. Follows the same two-tier convention as
 /// <c>StreamsMicroBenchmarks.cs</c>: this file is the in-process, allocation-focused tier;
 /// <c>EventSourcingPerfBenchmarkTests.cs</c> in the service-test project is the real-Redis throughput
@@ -108,7 +107,7 @@ public class EventProjectorDispatchBenchmarks
                 PartitionKey: "widget-1",
                 CorrelationId: "corr-1",
                 TraceParent: null,
-                Headers: HeaderBlock.Pack([new("es-version", "1")])),
+                Headers: HeaderBlock.Pack([new("tenant", "acme")])),
         ];
     }
 

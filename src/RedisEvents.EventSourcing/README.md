@@ -178,11 +178,11 @@ entries of both shapes.
 
 Both writes are one transaction: a version-check failure applies neither, and a connection lost
 around `EXEC` leaves an outcome that is unknown but never torn — the aggregate's history and the
-topic can never disagree about what happened. Every published event also carries an `es-version`
-header (its 1-based position in the aggregate's stream) purely as an informational aid for a human
-reading the raw stream — `EventProjector` does not read it, and no projection needs to: `EventMeta.Id`
-already lets a projection tell a redelivery from new information, on this topic or any other, whether
-or not its producer is this package's own event store. See [View stores](#view-stores).
+topic can never disagree about what happened. The repository stamps no headers of its own — only the
+caller's correlation id and headers are written — so an event saved without any carries no header
+field at all. No projection needs a per-event version or id header: `EventMeta.Id` already lets a
+projection tell a redelivery from new information, on this topic or any other, whether or not its
+producer is this package's own event store. See [View stores](#view-stores).
 
 ## Optimistic concurrency
 
