@@ -405,7 +405,9 @@ internal static partial class PartitionWorker
                         // reading the stream (it is one command covering every key), so the slot is
                         // retired instead: read on, discard, record nothing.
                         retired[slot] = true;
-                        partitions[slot].Monitor?.MarkStopped("the partition was stood down while its co-located siblings kept reading");
+                        partitions[slot].Monitor?.MarkStopped(
+                            "the partition was stood down while its co-located siblings kept reading",
+                            escalate: true);
 
                         partitions[slot].Log.LogWarning(
                             "Streams: partition {Partition} of topic {Topic} consumer {Consumer} was stood down, so the " +

@@ -82,6 +82,14 @@ public sealed record ConsumerOptions
     public int UnhealthyBlockSeconds { get; set; } = 300;
 
     /// <summary>
+    /// Seconds a partition that stood down outside any <see cref="ErrorPolicy"/> decision (a
+    /// contested position, a retired co-located slot) may stay stopped while its stream keeps
+    /// moving before the health check reports Unhealthy (default: 300). Nothing reads such a
+    /// partition again without a restart, so past this point a restart is the fix.
+    /// </summary>
+    public int UnhealthyStoppedSeconds { get; set; } = 300;
+
+    /// <summary>
     /// Whether to use Redis consumer groups (default: false).
     /// </summary>
     public bool UseConsumerGroup { get; set; }

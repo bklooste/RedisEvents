@@ -201,6 +201,86 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// The ungraceful sibling of the test above, and what actually happened to offer-odds on a
+    /// rolling deploy: pod A keeps running — it still holds partition 0 and so its presence field is
+    /// live — but gives partition 1 up to a newly arrived pod B on its next lease cycle. A's last
+    /// async flush for partition 1 then lands after B has claimed it. The live-presence check alone
+    /// reads that as a genuine rival (A is alive), B has the higher id, B stands down, keeps the
+    /// lease, and nobody reads partition 1 until B restarts. The claim field is what tells a late
+    /// write from a rival, so B must ask it.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_late_flush_from_a_live_peer_that_gave_the_partition_up_does_not_stand_the_new_owner_down()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var topic = fixture.NewTopic("lease-late-flush");
+        var consumer = fixture.NewConsumer("lease-late-flush");
+
+        await using var podA = fixture.AsInstance("svc-7d4f8b-aaaaa");
+        await using var podB = fixture.AsInstance("svc-7d4f8b-bbbbb");
+
+        // Alone, A claims both partitions. RefreshAsync rather than StartAsync: the cycles are driven
+        // by hand so the handoff below happens in a known order, with no renewal timer racing it.
+        await using var ownA = this.LeaseRegistry(topic, consumer, podA, partitions: 2);
+        (await ownA.RefreshAsync(ct)).Owners.Keys.Should().BeEquivalentTo(new[] { 0, 1 });
+
+        var contestedA = new List<int>();
+        var contestedB = new List<int>();
+
+        // exclusiveClaims: what the host passes under Instances:Mode = Lease, where HSETNX makes the
+        // claim field name exactly one holder. Static mode keeps the id tiebreak (see S6e).
+        await using var flushA = this.Flusher(topic, consumer, podA, (p, _, _) => contestedA.Add(p), partitions: 2, exclusiveClaims: true);
+        await using var flushB = this.Flusher(topic, consumer, podB, (p, _, _) => contestedB.Add(p), partitions: 2, exclusiveClaims: true);
+
+        flushA.Record(1, new StreamId(1000, 0));
+        await flushA.FlushAsync(ct);
+
+        // B arrives: with two members the fair share is one partition each. B's first cycle finds
+        // nothing free; A's next cycle releases its surplus (partition 1); B's next cycle claims it.
+        // A is still alive and still holds partition 0 throughout — this is not a release of A.
+        await using var ownB = this.LeaseRegistry(topic, consumer, podB, partitions: 2);
+        await ownB.RefreshAsync(ct);
+        await ownA.RefreshAsync(ct);
+        await ownB.RefreshAsync(ct);
+
+        ownA.Held.Should().Equal(new[] { 0 }, "A gave up its surplus partition and kept the other");
+        ownB.Held.Should().Equal(new[] { 1 }, "B claimed the partition A released");
+
+        // A's delayed async flush for the partition it no longer holds lands after B's claim.
+        flushA.Record(1, new StreamId(1001, 0));
+        await flushA.FlushAsync(ct);
+
+        var beforeB = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        beforeB[1].InstanceId.Should().Be(podA.InstanceId, "A's late write really did land after B claimed the partition");
+
+        flushB.Record(1, new StreamId(2000, 0));
+        await flushB.FlushAsync(ct);
+
+        flushB.ContestedCount.Should().Be(
+            0,
+            "A is alive but no longer holds partition 1's claim — B does — so A's write is a late flush, not a rival");
+        contestedB.Should().BeEmpty("nothing may stop the new owner's worker");
+        flushB.ContentionCount.Should().Be(0, "a late write is not an overlap and must not raise the contention gauge");
+
+        // Both sides keep writing what they own: B partition 1, A partition 0.
+        flushB.Record(1, new StreamId(2001, 0));
+        flushA.Record(0, new StreamId(500, 0));
+        await flushB.FlushAsync(ct);
+        await flushA.FlushAsync(ct);
+
+        var stored = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        stored[1].Id.Should().Be(new StreamId(2001, 0), "B keeps writing partition 1 undisturbed");
+        stored[1].InstanceId.Should().Be(podB.InstanceId);
+        stored[0].Id.Should().Be(new StreamId(500, 0), "A keeps writing the partition it still holds");
+        stored[0].InstanceId.Should().Be(podA.InstanceId);
+        contestedA.Should().BeEmpty();
+
+        await ownB.StopAsync(ct);
+        await ownA.StopAsync(ct);
+    }
+
+    /// <summary>
     /// A StatefulSet pod bounces back into its own ordinal. The predecessor's position is sitting in
     /// the field, so the first flush of the new process must recognise it as its own history rather
     /// than as a rival and stand itself down.
@@ -388,14 +468,14 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
             },
             NullLogger.Instance);
 
-    private OwnershipRegistry LeaseRegistry(string topic, string consumer, RedisStreamsFixture.StreamsInstance pod)
+    private OwnershipRegistry LeaseRegistry(string topic, string consumer, RedisStreamsFixture.StreamsInstance pod, int partitions = 1)
         => new(
             pod.Redis,
             new OwnershipRegistryOptions
             {
                 Topic = topic,
                 Consumer = consumer,
-                Partitions = 1,
+                Partitions = partitions,
                 PodName = pod.PodName,
                 InstanceId = pod.InstanceId,
                 Mode = InstanceMode.Lease,
@@ -408,17 +488,20 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
         string topic,
         string consumer,
         RedisStreamsFixture.StreamsInstance pod,
-        PartitionContestedCallback? onContested)
+        PartitionContestedCallback? onContested,
+        int partitions = 1,
+        bool exclusiveClaims = false)
         => new(
             new RedisPositionStore(pod.Redis, pod.InstanceId),
             topic,
             consumer,
-            partitionCount: 1,
+            partitionCount: partitions,
             Interval,
             NullLogger.Instance,
             pod.Redis,
             pod.InstanceId,
-            onContested);
+            onContested,
+            exclusiveClaims: exclusiveClaims);
 
     private async Task<RunningConsumer> StartConsumerAsync(
         string topic,

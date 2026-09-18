@@ -479,7 +479,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 redis,
                 instanceId: default,
                 onContested: this.OnPartitionContested,
-                resets: resets);
+                resets: resets,
+                exclusiveClaims: (this.consumer.Instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease);
 
             this.flusher.Start();
         }
@@ -1030,7 +1031,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 partition,
                 key,
                 this.consumer.UnhealthyLagMs,
-                this.consumer.UnhealthyBlockSeconds);
+                this.consumer.UnhealthyBlockSeconds,
+                this.consumer.UnhealthyStoppedSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1200,7 +1202,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 partition,
                 key,
                 this.consumer.UnhealthyLagMs,
-                this.consumer.UnhealthyBlockSeconds);
+                this.consumer.UnhealthyBlockSeconds,
+                this.consumer.UnhealthyStoppedSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1407,7 +1410,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             partition,
             key,
             this.consumer.UnhealthyLagMs,
-            this.consumer.UnhealthyBlockSeconds);
+            this.consumer.UnhealthyBlockSeconds,
+            this.consumer.UnhealthyStoppedSeconds);
 
         this.monitors.Add(monitor);
 
@@ -1856,6 +1860,20 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 this.consumerName,
                 theirs,
                 mine);
+
+            // Nobody decided this stop, so nothing else will ever undo it: the health check must see
+            // it (it reported Healthy before) and, if the stream keeps moving past
+            // UnhealthyStoppedSeconds, must say Unhealthy so a restart hands the partition on.
+            foreach (var monitor in this.monitors)
+            {
+                if (monitor.Partition == partition)
+                {
+                    monitor.MarkStopped(
+                        $"contested position: instance {theirs:D} was also writing it, so this instance stood down",
+                        escalate: true);
+                    break;
+                }
+            }
 
             runner.Stop();
             return;

@@ -6,6 +6,28 @@ actually changed.
 
 ## 2026-09-18
 
+### Fixed
+
+- **A Lease-mode handoff could leave a partition read by nobody until the new owner restarted.**
+  The two-writer guard asked only whether the foreign writer in a position field was still *alive*.
+  On a rolling deploy the outgoing owner stays alive (it keeps its other partitions and so its
+  presence field) while its last async flush for the partition it gave up lands after the new owner
+  has claimed it. The new owner read that as a live rival, lost the id tiebreak, stood the partition
+  down — and kept the lease, so the peer never re-claimed it. Seen on `offer-odds` for eight hours;
+  the pod passed liveness throughout. The guard now also reads the partition's claim field in the
+  same `HMGET`: a live writer that does not hold the claim is a late flush, logged at Information
+  and ignored. Issue #14 proved the *graceful* release was safe; this is the ungraceful sibling.
+- **A contested stand-down now marks its partition monitor**, so the health check reports it
+  (`partitionsStopped`, Degraded) instead of Healthy.
+
+### Added
+
+- **`Streams:Consumers:<n>:UnhealthyStoppedSeconds`** (default `300`). A partition that stood down
+  outside any `ErrorPolicy` decision — a contested position, a retired co-located slot — and is
+  behind a stream that is still being written turns the health check **Unhealthy** once it has
+  been stopped this long, so a liveness restart hands the partition on. `ErrorPolicy.StopPartition`
+  stops are an operator's decision and stay Degraded.
+
 ### Changed — breaking (wire)
 
 - **`IEventRepository.SaveAsync` no longer stamps `es-version` or `es-id` headers.** Nothing in the
