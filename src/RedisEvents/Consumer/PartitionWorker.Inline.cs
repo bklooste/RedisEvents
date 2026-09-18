@@ -376,7 +376,8 @@ internal static partial class PartitionWorker
                             if (i != slot)
                             {
                                 partitions[i].Monitor?.MarkStopped(
-                                    "a co-located sibling stopped and inline co-located partitions share one read loop");
+                                    "a co-located sibling stopped and inline co-located partitions share one read loop",
+                                    escalate: true);
                             }
                         }
 

@@ -59,6 +59,8 @@ internal sealed class StreamPartitionMonitor
     private long lagEntries = -1;
     private int state;
     private long blockedSince;
+    private long stoppedSince;
+    private int escalates;
     private string? stopReason;
 
     internal StreamPartitionMonitor(
@@ -67,7 +69,8 @@ internal sealed class StreamPartitionMonitor
         int partition,
         RedisKey streamKey,
         int unhealthyLagMs,
-        int unhealthyBlockSeconds)
+        int unhealthyBlockSeconds,
+        int unhealthyStoppedSeconds = 300)
     {
         this.Topic = topic;
         this.Consumer = consumer;
@@ -75,6 +78,7 @@ internal sealed class StreamPartitionMonitor
         this.StreamKey = streamKey;
         this.UnhealthyLagMs = unhealthyLagMs;
         this.UnhealthyBlockSeconds = unhealthyBlockSeconds;
+        this.UnhealthyStoppedSeconds = unhealthyStoppedSeconds;
         this.MetricKey = StreamLag.Key(topic, consumer, partition);
         this.StreamMetricKey = string.Concat(topic, ":", partition.ToString(CultureInfo.InvariantCulture));
     }
@@ -99,6 +103,31 @@ internal sealed class StreamPartitionMonitor
 
     /// <summary>Seconds a partition may stay blocked before the health check reports Unhealthy.</summary>
     internal int UnhealthyBlockSeconds { get; }
+
+    /// <summary>
+    /// Seconds a stood-down partition that is behind its stream may stay stopped before the health
+    /// check reports Unhealthy — only for stops that <see cref="Escalates"/>.
+    /// </summary>
+    internal int UnhealthyStoppedSeconds { get; }
+
+    /// <summary>
+    /// Whether this stop should turn Unhealthy once it has lasted <see cref="UnhealthyStoppedSeconds"/>
+    /// with the stream still moving. A contested or co-located stand-down is nobody's decision — the
+    /// partition is simply not being read and only a restart brings it back. An
+    /// <c>ErrorPolicy.StopPartition</c> stop is an operator's decision and stays Degraded.
+    /// </summary>
+    internal bool Escalates => Volatile.Read(ref this.escalates) != 0;
+
+    /// <summary>Milliseconds this partition has been stopped, or 0 when it is not stopped.</summary>
+    internal double StoppedMs
+    {
+        get
+        {
+            var since = Volatile.Read(ref this.stoppedSince);
+
+            return since == 0 ? 0 : Stopwatch.GetElapsedTime(since).TotalMilliseconds;
+        }
+    }
 
     internal PartitionRunState State => (PartitionRunState)Volatile.Read(ref this.state);
 
@@ -190,6 +219,8 @@ internal sealed class StreamPartitionMonitor
     {
         Volatile.Write(ref this.stopReason, null);
         Volatile.Write(ref this.state, (int)PartitionRunState.Running);
+        Volatile.Write(ref this.stoppedSince, 0);
+        Volatile.Write(ref this.escalates, 0);
         this.ClearBlock();
     }
 
@@ -219,9 +250,20 @@ internal sealed class StreamPartitionMonitor
 
     /// <summary>The partition has stood down and will not read again without a restart.</summary>
     /// <param name="reason">Why — surfaced verbatim in the health check description.</param>
-    internal void MarkStopped(string reason)
+    /// <param name="escalate">
+    /// Whether this stop turns Unhealthy after <see cref="UnhealthyStoppedSeconds"/> if the stream
+    /// keeps moving. The first mark decides: a later re-mark of an already stopped partition (the
+    /// co-located reader retiring a slot its policy already stopped) keeps the original verdict.
+    /// </param>
+    internal void MarkStopped(string reason, bool escalate = false)
     {
         Volatile.Write(ref this.stopReason, reason);
+
+        if (Interlocked.CompareExchange(ref this.stoppedSince, Stopwatch.GetTimestamp(), 0) == 0)
+        {
+            Volatile.Write(ref this.escalates, escalate ? 1 : 0);
+        }
+
         Volatile.Write(ref this.state, (int)PartitionRunState.Stopped);
         this.ClearBlock();
     }
@@ -291,6 +333,7 @@ internal static class StreamLag
     /// <param name="streamKey">The partition's stream key, for the entry sample.</param>
     /// <param name="unhealthyLagMs">Lag threshold from <c>ConsumerOptions.UnhealthyLagMs</c>.</param>
     /// <param name="unhealthyBlockSeconds">Block threshold from <c>ConsumerOptions.UnhealthyBlockSeconds</c>.</param>
+    /// <param name="unhealthyStoppedSeconds">Stood-down threshold from <c>ConsumerOptions.UnhealthyStoppedSeconds</c>.</param>
     /// <returns>The monitor for that partition.</returns>
     internal static StreamPartitionMonitor Track(
         string topic,
@@ -298,13 +341,14 @@ internal static class StreamLag
         int partition,
         RedisKey streamKey,
         int unhealthyLagMs = 120_000,
-        int unhealthyBlockSeconds = 300)
+        int unhealthyBlockSeconds = 300,
+        int unhealthyStoppedSeconds = 300)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentException.ThrowIfNullOrWhiteSpace(consumer);
 
         var monitor = new StreamPartitionMonitor(
-            topic, consumer, partition, streamKey, unhealthyLagMs, unhealthyBlockSeconds);
+            topic, consumer, partition, streamKey, unhealthyLagMs, unhealthyBlockSeconds, unhealthyStoppedSeconds);
 
         return Monitors.AddOrUpdate(monitor.MetricKey, monitor, (_, _) => monitor);
     }

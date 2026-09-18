@@ -74,6 +74,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// <summary>A live second writer was seen. Outranks <see cref="ReportedStale"/>.</summary>
     private const int ReportedContention = 2;
 
+    /// <summary>A live peer's late write landed on a partition this instance holds the claim for.</summary>
+    private const int ReportedLateWrite = 3;
+
     private readonly IPositionStore store;
     private readonly IConnectionMultiplexer? redis;
     private readonly RedisKey key;
@@ -84,6 +87,15 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private readonly TimeSpan interval;
     private readonly ILogger? log;
     private readonly PartitionContestedCallback? onContested;
+
+    /// <summary>
+    /// Whether a partition's claim field names exactly one holder. True under
+    /// <c>InstanceMode.Lease</c>, where claims are taken with <c>HSETNX</c>; false under Static, where
+    /// every configured instance rewrites its claims each cycle and two misconfigured replicas of one
+    /// ordinal flip the field between them — there the claim proves nothing and only the id tiebreak
+    /// can settle it.
+    /// </summary>
+    private readonly bool exclusiveClaims;
 
     private readonly KeyValuePair<string, object?> topicTag;
     private readonly KeyValuePair<string, object?> consumerTag;
@@ -168,6 +180,11 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// small <c>HMGET</c> per second per consumer. A service with many idle topics can widen it; the
     /// only thing it delays is how quickly a <em>running</em> consumer rewinds.
     /// </param>
+    /// <param name="exclusiveClaims">
+    /// True when the ownership registry runs in <c>InstanceMode.Lease</c>, so a partition's claim
+    /// field names its one holder and a live writer that is not that holder is a late flush, not a
+    /// rival. False (Static) keeps the id tiebreak as the only judge.
+    /// </param>
     internal PositionFlusher(
         IPositionStore store,
         string topic,
@@ -179,7 +196,8 @@ internal sealed class PositionFlusher : IAsyncDisposable
         Guid instanceId = default,
         PartitionContestedCallback? onContested = null,
         ResetSignal? resets = null,
-        TimeSpan? resetPollInterval = null)
+        TimeSpan? resetPollInterval = null,
+        bool exclusiveClaims = false)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
@@ -194,6 +212,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
         this.interval = interval;
         this.log = log;
         this.onContested = onContested;
+        this.exclusiveClaims = exclusiveClaims;
 
         this.instanceId = instanceId != Guid.Empty
             ? instanceId
@@ -660,13 +679,16 @@ internal sealed class PositionFlusher : IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var presence = new RedisValue[candidates];
+            // Two questions per candidate in one HMGET: is the foreign writer alive (its presence
+            // field), and who holds the partition's claim right now (the partition field).
+            var fields = new RedisValue[candidates * 2];
             for (var i = 0; i < candidates; i++)
             {
-                presence[i] = OwnershipRegistry.PresenceField(this.foreignRecords[i].InstanceId);
+                fields[i] = OwnershipRegistry.PresenceField(this.foreignRecords[i].InstanceId);
+                fields[candidates + i] = this.foreignPartitions[i].ToString(CultureInfo.InvariantCulture);
             }
 
-            live = await db.HashGetAsync(this.ownershipKey, presence).ConfigureAwait(false);
+            live = await db.HashGetAsync(this.ownershipKey, fields).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -680,7 +702,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
             return;
         }
 
-        for (var i = 0; i < candidates && i < live.Length; i++)
+        for (var i = 0; i < candidates && candidates + i < live.Length; i++)
         {
             var partition = this.foreignPartitions[i];
             var other = this.foreignRecords[i];
@@ -690,6 +712,20 @@ internal sealed class PositionFlusher : IAsyncDisposable
                 // The id is in the field but its owner is gone: a previous life of this consumer, an
                 // out-of-process reset, or a pod that has since died. Nothing to stand down for.
                 this.NoteStale(partition, other);
+                continue;
+            }
+
+            // R-01 follow-up. The writer is alive, but "alive" is not "owns this partition". On a
+            // Lease-mode handoff the old owner keeps its other partitions — and its presence field —
+            // while its last async flush for the one it gave up lands after the new owner has claimed
+            // it. That write is late, not rival: the claim says so, and the claim is the only thing
+            // that can. Without this check the new owner stood down, kept the lease, and the
+            // partition was read by nobody until a restart.
+            if (this.exclusiveClaims &&
+                !live[candidates + i].IsNull &&
+                PartitionOwner.Parse(partition, (string)live[candidates + i]!).InstanceId == this.instanceId)
+            {
+                this.NoteLateWrite(partition, other);
                 continue;
             }
 
@@ -722,6 +758,29 @@ internal sealed class PositionFlusher : IAsyncDisposable
             "Streams: partition {Partition} of topic {Topic} consumer {Consumer} carried a position written by instance " +
             "{Other}, which holds no live ownership claim — a previous life of this consumer, or a position written by an " +
             "admin tool. Continuing to write it.",
+            partition,
+            this.topic,
+            this.consumer,
+            other.InstanceId.ToString("D", CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Reports, once per partition, that a live peer wrote a position for a partition whose
+    /// ownership claim this instance holds — a late flush from before the handoff, not a rival.
+    /// </summary>
+    /// <param name="partition">The partition.</param>
+    /// <param name="other">The record found in the field before our write.</param>
+    private void NoteLateWrite(int partition, PositionRecord other)
+    {
+        if (Interlocked.CompareExchange(ref this.reported[partition], ReportedLateWrite, ReportedNothing) != ReportedNothing)
+        {
+            return;
+        }
+
+        this.log?.LogInformation(
+            "Streams: partition {Partition} of topic {Topic} consumer {Consumer} carried a position written by live instance " +
+            "{Other}, which no longer holds that partition's claim — this instance does. A late flush from before the " +
+            "handoff, not a second writer. Continuing to write it.",
             partition,
             this.topic,
             this.consumer,

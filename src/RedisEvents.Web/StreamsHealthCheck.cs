@@ -130,6 +130,15 @@ public sealed class StreamsHealthCheck : IHealthCheck
                 data);
         }
 
+        if (tally.StoppedTooLong is { } abandoned)
+        {
+            return Unhealthy(
+                $"Streams: partition {Describe(abandoned)} stood down {Seconds(abandoned.StoppedMs)}s ago ({abandoned.StopReason}) and is " +
+                $"{abandoned.LagEntries} entries behind a stream that is still being written, past its UnhealthyStoppedSeconds of " +
+                $"{abandoned.UnhealthyStoppedSeconds}. Nothing reads it again without a restart.",
+                data);
+        }
+
         if (hosts.Count > 0 && started == 0)
         {
             return Unhealthy(
@@ -246,6 +255,18 @@ public sealed class StreamsHealthCheck : IHealthCheck
                 monitor.BlockedMs > monitor.UnhealthyBlockSeconds * 1000d)
             {
                 counts.BlockedTooLong ??= monitor;
+            }
+
+            // "Not progressed for N seconds and not at head": a stood-down partition nobody chose to
+            // stop, with entries piling up behind it that only a restart will ever read. LagEntries
+            // comes from the sampler, which keeps sampling a stopped partition; -1 (never sampled)
+            // and 0 (at the tail) both mean there is nothing to escalate yet.
+            if (monitor.State == PartitionRunState.Stopped &&
+                monitor.Escalates &&
+                monitor.LagEntries > 0 &&
+                monitor.StoppedMs > monitor.UnhealthyStoppedSeconds * 1000d)
+            {
+                counts.StoppedTooLong ??= monitor;
             }
         }
 
@@ -394,6 +415,12 @@ public sealed class StreamsHealthCheck : IHealthCheck
 
         /// <summary>The first partition found past its lag threshold, if any.</summary>
         public StreamPartitionMonitor? Lagging;
+
+        /// <summary>
+        /// The first stood-down partition that is behind a still-moving stream and has been so past
+        /// its <c>UnhealthyStoppedSeconds</c>, if any. Only stops that escalate count.
+        /// </summary>
+        public StreamPartitionMonitor? StoppedTooLong;
 
         /// <summary>The first partition found blocked past its block threshold, if any.</summary>
         public StreamPartitionMonitor? BlockedTooLong;
