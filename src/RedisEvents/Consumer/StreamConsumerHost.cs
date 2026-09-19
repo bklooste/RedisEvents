@@ -531,6 +531,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                         this.consumerName,
                         index: 0,
                         this.log,
+                        this.connection.TracingApplier,
                         concurrentReads)
                     .ConfigureAwait(false);
             }

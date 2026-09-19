@@ -873,7 +873,8 @@ public static class StreamsBuilderExtensions
         builder.Services.AddSingleton(sp => new StreamsConnectionProvider(
             options,
             sp,
-            sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents")));
+            sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents"),
+            sp.GetService<IRedisTracingApplier>() ?? NoOpRedisTracingApplier.Instance));
 
         // Registered first, so its advisory lines land above the consumer hosts' startup logs.
         builder.Services.AddSingleton<IHostedService>(sp => new StreamsConfigurationAdvisor(

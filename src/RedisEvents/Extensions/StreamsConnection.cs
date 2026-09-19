@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using RedisEvents.Config;
 using RedisEvents.Diagnostics;
 using RedisEvents.Errors;
+using RedisEvents.Tracing;
 using StackExchange.Redis;
 
 namespace RedisEvents.Extensions;
@@ -85,6 +86,7 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
     private readonly StreamOptions options;
     private readonly IServiceProvider? services;
     private readonly ILogger? logger;
+    private readonly IRedisTracingApplier? tracingApplier;
     private readonly Lock gate = new();
 
     private IConnectionMultiplexer? connection;
@@ -98,18 +100,36 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
     /// <param name="services">The container to look for an existing multiplexer in; may be <see langword="null"/>.</param>
     /// <param name="logger">Optional logger; the resolution path is logged at Information.</param>
     public StreamsConnectionProvider(StreamOptions options, IServiceProvider? services, ILogger? logger)
+        : this(options, services, logger, null)
+    {
+    }
+    
+    /// <summary>
+    /// Creates a provider that resolves lazily on first access to <see cref="Connection"/> with tracing support.
+    /// </summary>
+    /// <param name="options">The bound stream options.</param>
+    /// <param name="services">The container to look for an existing multiplexer in; may be <see langword="null"/>.</param>
+    /// <param name="logger">Optional logger; the resolution path is logged at Information.</param>
+    /// <param name="tracingApplier">Optional tracing applier for Redis operation tracing.</param>
+    public StreamsConnectionProvider(StreamOptions options, IServiceProvider? services, ILogger? logger, IRedisTracingApplier? tracingApplier)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         this.options = options;
         this.services = services;
         this.logger = logger;
+        this.tracingApplier = tracingApplier;
     }
 
     /// <summary>
     /// The configured connection string, after defaulting.
     /// </summary>
     public string ConnectionString => StreamConfigBinder.ResolveConnectionString(this.options);
+
+    /// <summary>
+    /// The tracing applier for Redis operation tracing, if configured.
+    /// </summary>
+    public IRedisTracingApplier? TracingApplier => this.tracingApplier;
 
     /// <summary>
     /// Whether the multiplexer was reused from the container or created by the library.
@@ -207,7 +227,12 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
         try
         {
             created = true;
-            return ConnectionMultiplexer.Connect(configured);
+            var connection = ConnectionMultiplexer.Connect(configured);
+            
+            // Apply Redis tracing if a tracing applier is available
+            this.tracingApplier?.ApplyTracing(connection);
+            
+            return connection;
         }
         catch (Exception ex)
         {
