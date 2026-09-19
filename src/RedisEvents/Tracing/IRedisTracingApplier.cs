@@ -1,3 +1,4 @@
+using OpenTelemetry.Trace;
 using StackExchange.Redis;
 
 namespace RedisEvents.Tracing;
@@ -14,6 +15,12 @@ public interface IRedisTracingApplier
     /// </summary>
     /// <param name="multiplexer">The connection multiplexer to apply tracing to.</param>
     void ApplyTracing(IConnectionMultiplexer multiplexer);
+    
+    /// <summary>
+    /// Configures tracing on the tracer provider builder.
+    /// </summary>
+    /// <param name="tracerProviderBuilder">The tracer provider builder to configure.</param>
+    void ConfigureTracing(TracerProviderBuilder tracerProviderBuilder);
 }
 
 /// <summary>
@@ -26,6 +33,11 @@ internal class NoOpRedisTracingApplier : IRedisTracingApplier
     private NoOpRedisTracingApplier() { }
     
     public void ApplyTracing(IConnectionMultiplexer multiplexer)
+    {
+        // No-op implementation
+    }
+    
+    public void ConfigureTracing(TracerProviderBuilder tracerProviderBuilder)
     {
         // No-op implementation
     }

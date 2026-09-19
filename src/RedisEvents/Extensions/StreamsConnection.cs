@@ -164,8 +164,12 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
                     return this.connection;
 
                 this.connection = Resolve(this.services, this.options, this.logger, out var created);
-                this.owned = created;
-                return this.connection;
+        this.owned = created;
+        
+        // Apply Redis tracing if a tracing applier is available
+        this.tracingApplier?.ApplyTracing(this.connection);
+        
+        return this.connection;
             }
         }
     }
@@ -227,12 +231,7 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
         try
         {
             created = true;
-            var connection = ConnectionMultiplexer.Connect(configured);
-            
-            // Apply Redis tracing if a tracing applier is available
-            this.tracingApplier?.ApplyTracing(connection);
-            
-            return connection;
+            return ConnectionMultiplexer.Connect(configured);
         }
         catch (Exception ex)
         {

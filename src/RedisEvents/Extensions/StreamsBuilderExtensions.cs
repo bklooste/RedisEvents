@@ -8,6 +8,7 @@ using RedisEvents.Config;
 using RedisEvents.Consumer;
 using RedisEvents.Errors;
 using RedisEvents.Producer;
+using RedisEvents.Tracing;
 using RedisEvents.Trimming;
 using RedisEvents.Wire;
 
