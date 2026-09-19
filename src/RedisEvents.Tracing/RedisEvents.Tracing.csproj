@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<!-- Symbolic on a class library (no runtimeconfig.json is emitted here) — documents intent
+		     for whatever app ends up hosting this. -->
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>OpenTelemetry tracing extensions for RedisEvents: distributed tracing for Redis Stream operations.</Description>
+		<PackageTags>redis;redis-streams;messaging;event-driven;outbox;opentelemetry;tracing;distributed-tracing</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="OpenTelemetry.Instrumentation.StackExchangeRedis" Version="1.12.0-beta.1" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.2" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
+	</ItemGroup>
+
+</Project>

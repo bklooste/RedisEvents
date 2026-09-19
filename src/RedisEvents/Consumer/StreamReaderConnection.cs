@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using RedisEvents.Config;
 using RedisEvents.Diagnostics;
 using RedisEvents.Errors;
+using RedisEvents.Tracing;
 using StackExchange.Redis;
 
 namespace RedisEvents.Consumer;
@@ -139,6 +140,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
     /// <param name="consumerName">The resolved consumer name, used in the client and thread names.</param>
     /// <param name="index">Reader index within the consumer, for when a consumer needs more than one.</param>
     /// <param name="logger">Optional logger; the resolved endpoint, client name and timeouts are logged at Information.</param>
+    /// <param name="tracingApplier">Optional tracing applier for Redis operation tracing.</param>
     /// <param name="concurrentReads">
     /// How many blocking reads this connection may have outstanding at once — one per read loop that
     /// will use it. See <see cref="CreateAsync"/> for why the timeout depends on it.
@@ -151,6 +153,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         string consumerName,
         int index,
         ILogger? logger,
+        IRedisTracingApplier? tracingApplier = null,
         int concurrentReads = 1)
     {
         var plan = Plan(options, consumer, consumerName, index, concurrentReads);
@@ -158,6 +161,10 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         try
         {
             var connected = ConnectionMultiplexer.Connect(plan.Configuration);
+            
+            // Apply Redis tracing if a tracing applier is available
+            tracingApplier?.ApplyTracing(connected);
+            
             Log(logger, plan, connected);
             return Wrap(plan, connected);
         }
@@ -176,6 +183,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
     /// <param name="consumerName">The resolved consumer name, used in the client and thread names.</param>
     /// <param name="index">Reader index within the consumer, for when a consumer needs more than one.</param>
     /// <param name="logger">Optional logger; the resolved endpoint, client name and timeouts are logged at Information.</param>
+    /// <param name="tracingApplier">Optional tracing applier for Redis operation tracing.</param>
     /// <param name="concurrentReads">
     /// How many blocking reads this connection may have outstanding at once — one per read loop that
     /// will use it. A co-located consumer issues one multi-stream <c>XREAD</c> for all its
@@ -192,6 +200,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         string consumerName,
         int index,
         ILogger? logger,
+        IRedisTracingApplier? tracingApplier = null,
         int concurrentReads = 1)
     {
         var plan = Plan(options, consumer, consumerName, index, concurrentReads);
@@ -199,6 +208,10 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         try
         {
             var connected = await ConnectionMultiplexer.ConnectAsync(plan.Configuration).ConfigureAwait(false);
+            
+            // Apply Redis tracing if a tracing applier is available
+            tracingApplier?.ApplyTracing(connected);
+            
             Log(logger, plan, connected);
             return Wrap(plan, connected);
         }
