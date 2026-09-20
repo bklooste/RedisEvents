@@ -21,14 +21,12 @@ public class OpenTelemetryRedisTracingApplier : IRedisTracingApplier
     }
 
     /// <summary>
-    /// Applies OpenTelemetry tracing to the given connection multiplexer.
+    /// Adds a connection the library created to the tracer provider's Redis instrumentation, so its
+    /// commands are traced. Needs <see cref="RedisTracingExtensions.AddRedisEventsConnectionTracing"/>
+    /// on the tracer provider; a connection made before the provider is built is held until then.
     /// </summary>
     /// <param name="multiplexer">The connection multiplexer to apply tracing to.</param>
-    public void ApplyTracing(IConnectionMultiplexer multiplexer)
-    {
-        // This is a no-op since tracing needs to be configured during tracer provider construction
-        // The actual configuration happens via ConfigureTracing method or via static method
-    }
+    public void ApplyTracing(IConnectionMultiplexer multiplexer) => RedisConnectionTracing.Apply(multiplexer);
 
     /// <summary>
     /// Configures Redis tracing on the tracer provider builder.

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Instrumentation.StackExchangeRedis;
 using OpenTelemetry.Trace;
 using RedisEvents.Config;
 using RedisEvents.Extensions;
@@ -31,5 +32,23 @@ public static class RedisTracingExtensions
         builder.Services.AddSingleton<IRedisTracingApplier>(sp => new OpenTelemetryRedisTracingApplier(configureTracing));
 
         return builder;
+    }
+
+    /// <summary>
+    /// Traces the Redis connections RedisEvents creates itself — the ones opened when
+    /// <c>Streams:ConnectionString</c> differs from the container's <c>IConnectionMultiplexer</c>, and
+    /// every consumer reader connection. Pair with <see cref="AddRedisTracing"/> on the host builder.
+    /// A multiplexer registered in the container is not touched: instrument that one with
+    /// <c>AddRedisInstrumentation(multiplexer)</c>.
+    /// </summary>
+    /// <param name="builder">The tracer provider builder.</param>
+    /// <returns>The same builder, for chaining.</returns>
+    public static TracerProviderBuilder AddRedisEventsConnectionTracing(this TracerProviderBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        return builder
+            .AddRedisInstrumentation()
+            .ConfigureRedisInstrumentation(RedisConnectionTracing.Attach);
     }
 }
