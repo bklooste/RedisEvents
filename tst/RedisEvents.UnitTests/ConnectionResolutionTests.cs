@@ -93,6 +93,38 @@ public class ConnectionResolutionTests
     }
 
     /// <summary>
+    /// A reused multiplexer is the host's to instrument. Applying tracing to it as well would register
+    /// the connection with the OTel instrumentation twice and emit every command span twice.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Tracing_is_not_applied_to_a_reused_multiplexer()
+    {
+        var candidate = FakeMultiplexer.At("127.0.0.1:6399");
+        var applier = new CountingApplier();
+        var provider = new StreamsConnectionProvider(
+            new StreamOptions { ConnectionString = Unreachable },
+            Container(candidate),
+            logger: null,
+            applier);
+
+        provider.Connection.Should().BeSameAs(candidate);
+
+        applier.Applied.Should().BeEmpty();
+    }
+
+    private sealed class CountingApplier : RedisEvents.Tracing.IRedisTracingApplier
+    {
+        public List<IConnectionMultiplexer> Applied { get; } = [];
+
+        public void ApplyTracing(IConnectionMultiplexer multiplexer) => this.Applied.Add(multiplexer);
+
+        public void ConfigureTracing(OpenTelemetry.Trace.TracerProviderBuilder tracerProviderBuilder)
+        {
+        }
+    }
+
+    /// <summary>
     /// The finding this file exists for. A registered multiplexer pointing somewhere else is
     /// declined, both endpoints are logged so the mismatch is visible rather than silent, and the
     /// library connects its own — here, to a closed port, so the attempt fails and is wrapped.

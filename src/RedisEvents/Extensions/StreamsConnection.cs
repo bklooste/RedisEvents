@@ -164,12 +164,15 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
                     return this.connection;
 
                 this.connection = Resolve(this.services, this.options, this.logger, out var created);
-        this.owned = created;
-        
-        // Apply Redis tracing if a tracing applier is available
-        this.tracingApplier?.ApplyTracing(this.connection);
-        
-        return this.connection;
+                this.owned = created;
+
+                // Only a multiplexer the library created is ours to instrument. A reused one belongs
+                // to the host, which instruments it itself; applying here too would register the
+                // connection twice and emit every command span twice.
+                if (created)
+                    this.tracingApplier?.ApplyTracing(this.connection);
+
+                return this.connection;
             }
         }
     }

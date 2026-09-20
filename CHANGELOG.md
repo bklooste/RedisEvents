@@ -4,6 +4,21 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-21
+
+### Fixed
+
+- **`RedisEvents.Tracing` did nothing.** `OpenTelemetryRedisTracingApplier.ApplyTracing` had an empty
+  body and nothing ever called `ConfigureTracing`, so referencing the package traced no Redis
+  command. Connections the library creates itself — a `Streams:ConnectionString` that differs from
+  the container's multiplexer, and every consumer reader connection — are now registered with the
+  tracer provider's `StackExchangeRedisInstrumentation`. Opt in with `AddRedisTracing()` on the host
+  builder and `AddRedisEventsConnectionTracing()` on the tracer provider; a connection made before
+  the provider is built is held until it exists.
+- **The tracing applier is no longer applied to a reused multiplexer.** That connection belongs to
+  the host, which instruments it itself; applying here too would register it twice and emit every
+  command span twice.
+
 ## 2026-09-18
 
 ### Fixed
