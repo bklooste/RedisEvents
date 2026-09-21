@@ -9,6 +9,9 @@
 		     for whatever app ends up hosting this. -->
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<!-- OpenTelemetry.Instrumentation.StackExchangeRedis has only ever shipped as -beta, so a stable
+		     release of this package necessarily depends on a prerelease. -->
+		<NoWarn>$(NoWarn);NU5104</NoWarn>
 		<IsAotCompatible>true</IsAotCompatible>
 		<Description>OpenTelemetry tracing extensions for RedisEvents: distributed tracing for Redis Stream operations.</Description>
 		<PackageTags>redis;redis-streams;messaging;event-driven;outbox;opentelemetry;tracing;distributed-tracing</PackageTags>
