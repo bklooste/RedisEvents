@@ -28,12 +28,56 @@ public abstract class AggregateRoot
 {
     readonly Dictionary<Type, Action<object>> handlers = [];
     readonly List<object> uncommitted = [];
+    string? boundId;
 
     /// <summary>
     /// The aggregate's identity within its <see cref="AggregateName"/> family. Together they form the
     /// key of the aggregate's event stream.
     /// </summary>
-    public abstract string Id { get; }
+    /// <remarks>
+    /// <para>
+    /// By default this is the id the aggregate was bound to with <see cref="BindId"/> — which
+    /// <see cref="IEventRepository.LoadAsync{TAggregate}"/> and
+    /// <see cref="EventRepositoryExtensions.LoadOrCreateAsync{TAggregate}"/> do for you — and empty until
+    /// then. The id is the address of the aggregate's stream, not a fact about the aggregate, so its
+    /// events need not repeat it: every event on <c>{AggregateName}:{Id}</c> belongs to that aggregate by
+    /// construction.
+    /// </para>
+    /// <para>
+    /// Override it only for an aggregate that carries its own id in its state — typically set from its
+    /// creation event, as the Inventory sample does. An override wins over the bound id.
+    /// </para>
+    /// </remarks>
+    public virtual string Id => boundId ?? string.Empty;
+
+    /// <summary>
+    /// Binds this instance to the stream it was loaded from, or is about to be created on.
+    /// </summary>
+    /// <param name="id">The aggregate's id within its <see cref="AggregateName"/> family.</param>
+    /// <remarks>
+    /// Loading through the repository already does this; call it yourself only for an instance you
+    /// construct directly, such as in a unit test. Binding again to the same id is a no-op.
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="id"/> is null, empty or whitespace.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The instance is already bound to a different id. An aggregate belongs to exactly one stream;
+    /// rebinding it would save one aggregate's decisions onto another's history.
+    /// </exception>
+    public void BindId(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        if (boundId is null)
+        {
+            boundId = id;
+            return;
+        }
+
+        if (!string.Equals(boundId, id, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{AggregateName} '{boundId}' cannot be rebound to '{id}'.");
+        }
+    }
 
     /// <summary>
     /// The stable name of this aggregate family, used to build its event stream's key.

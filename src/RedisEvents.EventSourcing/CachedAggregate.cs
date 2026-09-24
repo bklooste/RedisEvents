@@ -21,7 +21,8 @@ namespace RedisEvents.EventSourcing;
 /// background actor make different choices about every one of those, and forcing them onto one shape
 /// would cost more than the duplication this type removes. This is deliberately not an actor, a cache
 /// with its own eviction policy, or a lock: it is the one loop both still needed, and used to hand-roll
-/// slightly differently every time it was written.
+/// slightly differently every time it was written. For an aggregate cheap enough to replay on every
+/// command, <see cref="EventRepositoryExtensions"/>' <c>ExecuteAsync</c> is the same loop without the cache.
 /// </para>
 /// <para>
 /// <b>Not thread-safe on its own.</b> Concurrent calls to <see cref="RunAsync{T}"/> on the same instance
@@ -139,6 +140,9 @@ public sealed class CachedAggregate<TAggregate>
             {
                 continue;
             }
+
+            // Throws before anything is cached again, so the half-decided instance is dropped with it.
+            decision.GuardRefusal(aggregate);
 
             if (aggregate.GetUncommittedChanges().Count == 0)
             {

@@ -98,6 +98,21 @@ public sealed class RedisEventRepository : IEventRepository
     /// <returns>The state stream name.</returns>
     internal static string StreamName(string aggregateName, string id) => $"es:{aggregateName}:{id}";
 
+    /// <summary>
+    /// Refuses to save an aggregate with no id. Its stream key would be <c>es:{AggregateName}:</c> — one
+    /// stream shared by every unbound instance of the family, which is never what was meant.
+    /// </summary>
+    static void RequireId(AggregateRoot aggregate)
+    {
+        if (string.IsNullOrWhiteSpace(aggregate.Id))
+        {
+            throw new InvalidOperationException(
+                $"A '{aggregate.AggregateName}' aggregate has no id and cannot be saved. Load it through the " +
+                $"repository, create it with {nameof(EventRepositoryExtensions.LoadOrCreateAsync)}, or call " +
+                $"{nameof(AggregateRoot.BindId)} on an instance constructed directly.");
+        }
+    }
+
     /// <inheritdoc />
     public async ValueTask<TAggregate?> LoadAsync<TAggregate>(string id, CancellationToken ct = default)
         where TAggregate : AggregateRoot, new()
@@ -165,6 +180,7 @@ public sealed class RedisEventRepository : IEventRepository
         }
 
         aggregate.LoadFromHistory(history);
+        aggregate.BindId(id);
         EventSourcingSpans.Loaded(activity, aggregate.Version);
         return aggregate;
     }
@@ -186,6 +202,7 @@ public sealed class RedisEventRepository : IEventRepository
             return aggregate.Version;
         }
 
+        RequireId(aggregate);
         var expected = expectedVersion ?? aggregate.Version;
         var name = StreamName(aggregate.AggregateName, aggregate.Id);
 
@@ -246,6 +263,7 @@ public sealed class RedisEventRepository : IEventRepository
             return aggregate.Version;
         }
 
+        RequireId(aggregate);
         var expected = aggregate.Version;
         var name = StreamName(aggregate.AggregateName, aggregate.Id);
 

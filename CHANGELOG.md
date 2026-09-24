@@ -4,6 +4,26 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-24
+
+### Added
+
+- **`repository.ExecuteAsync<TAggregate, T>(id, decide, ...)`** — the uncached load-decide-save-retry
+  loop for one command, next to `CachedAggregate`'s cached one. Replaces the loop services were
+  hand-rolling per aggregate. Returns `CommandResult<T>(Value, Version)`; an exhausted retry lets the
+  last `ConcurrencyException` propagate, as `CachedAggregate` does. See the EventSourcing README's
+  *Running commands*.
+- **`AggregateDecision<T>.Refused(result)`** — a final decision that must have raised nothing. Both
+  runners throw `InvalidOperationException` if the aggregate raised events before refusing.
+- **`repository.LoadOrCreateAsync<T>(id)`** — the loaded aggregate, or a new one bound to `id`.
+- **`AggregateRoot.BindId(id)`**, and `AggregateRoot.Id` is now `virtual` (was `abstract`), defaulting
+  to the bound id. `LoadAsync` binds the id it loaded by. Aggregates that override `Id` are unaffected.
+
+### Changed
+
+- **Saving an aggregate whose `Id` is empty now throws `InvalidOperationException`** instead of
+  writing to the stream `es:{AggregateName}:`.
+
 ## 2026-09-21
 
 ### Fixed
