@@ -504,6 +504,34 @@ same terms.
 
 ---
 
+### Forwarding one topic onto another
+
+A service that consumes one topic and announces what it saw on another — a ledger's events mapped onto
+a public `transactions` topic — cannot join the source's transaction, and its read is at-least-once: a
+redelivery, a restart before a position flush, or a lost consumer position replaying the whole
+retained source would all republish events already forwarded. `TopicForwarder` makes that exactly once
+in effect with two guards, written in the same `MULTI`/`EXEC` as the publish:
+
+- a durable **high-water mark** per source — the position of the last event forwarded from it. Anything
+  at or below it is skipped, which is what makes a full replay harmless. This is the guarantee.
+- an `Idempotency` marker per dedupe id, for redeliveries inside its TTL (a week by default). An
+  optimisation, not a lock.
+
+```csharp
+var forwarder = new TopicForwarder(sharedDb, "transactions", streamOptions);
+
+// in the projection handler for the source topic:
+await forwarder.ForwardAsync(
+    source: "customer_wallet",                       // one ordered source: a topic, or "{topic}:{partition}"
+    dedupeId: $"{meta.PartitionKey}:{e.TransactionId}",
+    position: meta.Id,
+    [new ForwardedMessage(customerId, body, typeof(WalletTransaction).FullName!)]);
+```
+
+It returns `false` when the event was forwarded already (or a concurrent forward from the same source
+moved the mark first) — nothing was written. A source must deliver in order, because the mark only
+moves forward: one partition of a topic is one source.
+
 ## Idempotency
 
 Delivery is **at-least-once**. Your handler will see the same message twice, and the sooner you
