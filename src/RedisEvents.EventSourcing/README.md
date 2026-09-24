@@ -222,6 +222,63 @@ for (var attempt = 0; ; attempt++)
 }
 ```
 
+## Running commands
+
+A command is a decision made against an aggregate's current state — "is there enough in this wallet",
+"is this bet still open". The version check makes a decision made against stale state fail to save
+instead of silently committing; what a command handler then has to do — throw the losing instance
+away, load the state that won, and decide again, because the answer may now be different — is the same
+loop every time. Two helpers carry it, so no service has to hand-roll it:
+
+| | Loads | Use when |
+|---|---|---|
+| `repository.ExecuteAsync<TAggregate, T>(id, decide, ...)` | fresh, every attempt | The default. Short or rarely-contended aggregates — a payment, a bet, a rate-limited wallet — where a replay per command is cheap and a cache would only add a stale-refusal class of bug. |
+| `CachedAggregate<TAggregate>.RunAsync(...)` | cached between calls, reloaded on conflict | Long-lived, hot aggregates where replay cost is real — an order book's market behind a single-reader actor. The caller serializes access. |
+
+```csharp
+var result = await repository.ExecuteAsync<Wallet, WalletResult>(
+    walletId,
+    wallet => wallet.Balance < amount
+        ? AggregateDecision<WalletResult>.Refused(WalletResult.Insufficient)
+        : AggregateDecision<WalletResult>.Done(wallet.Debit(txId, amount)),
+    maxAttempts: 5,
+    onConflict: (attempt, _, ct) => Task.Delay(Random.Shared.Next(5, 30), ct));
+// result.Value, result.Version
+```
+
+The decision returns one of three things:
+
+- **`Done(result)`** saves whatever it raised (nothing is fine) and returns `result`.
+- **`Refused(result)`** saves nothing and returns `result`. A command must decide *before* it raises
+  anything, so a refusal that has already raised events is a bug in the aggregate: both runners throw
+  `InvalidOperationException` rather than save half a change or quietly drop it.
+- **`Redo()`** discards the instance and decides again against a fresh load, not counted as an attempt.
+
+What the runners deliberately do not decide: how many attempts are worth it (`maxAttempts`, default
+1 — no retry, which is right for a command carrying a version its caller read), how to back off
+(`onConflict`), and what giving up means — the last `ConcurrencyException` propagates, for an HTTP
+handler to turn into a 409 or a consumer to fail the message on. Refusals are return values, in
+whatever result type the service already has; the library adds no result type of its own beyond
+`CommandResult<T>(Value, Version)`.
+
+`concurrencyCheck: false` saves with `SaveWithoutConcurrencyCheckAsync` — only for a command that is
+single-writer by construction, such as the one that creates the aggregate before anything else knows
+it exists.
+
+### Ids belong to the stream
+
+An aggregate's id is the address of its stream (`es:{AggregateName}:{Id}`), not a fact about it, so
+its events need not carry it. `AggregateRoot.Id` defaults to the id the instance was **bound** to:
+`LoadAsync` binds what it loads, and `repository.LoadOrCreateAsync<T>(id)` returns the loaded
+aggregate or a new, empty one already bound — for aggregates where "no history yet" is the ordinary
+starting state (a wallet on its first deposit) rather than "not found". `LoadAsync` still returns
+`null` for no history, for callers where it is an answer.
+
+An aggregate that carries its id in its own state — like the Inventory sample, set from
+`ItemCreated` — keeps overriding `Id`, and the override wins. An instance constructed directly (a
+unit test) is bound with `BindId(id)`. Saving an aggregate with no id is refused, rather than written
+to a stream shared by every unbound instance.
+
 ## Serialisation and the event-type registry
 
 `RegisterJson` covers the default, AOT-safe path via a source-generated `JsonTypeInfo<T>`. The wire

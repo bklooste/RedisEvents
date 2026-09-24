@@ -82,6 +82,25 @@ internal sealed class TestWidget : AggregateRoot
 }
 
 /// <summary>
+/// An aggregate whose id is not on its events: it takes <see cref="AggregateRoot.Id"/>'s default, the id
+/// the repository binds from the stream key.
+/// </summary>
+internal sealed class StreamBoundWidget : AggregateRoot
+{
+    /// <summary>Registers the one event it knows.</summary>
+    public StreamBoundWidget() => this.On<WidgetTicked>(e => this.Ticks++);
+
+    /// <inheritdoc />
+    public override string AggregateName => "StreamBoundWidget";
+
+    /// <summary>How many ticks have been applied.</summary>
+    public int Ticks { get; private set; }
+
+    /// <summary>Records one tick.</summary>
+    public void Tick(int sequence) => this.Raise(new WidgetTicked(sequence));
+}
+
+/// <summary>
 /// Service tests for <see cref="RedisEventRepository"/> against a real Redis: the load/save round
 /// trip, the version check, the topic publish that rides with the append, and the paged replay that
 /// replaces the reference implementation's silently-truncating single read.
@@ -419,6 +438,61 @@ public sealed class EventRepositoryTests(RedisStreamsFixture fixture)
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .WithMessage("*widget.from-the-future*");
+    }
+
+    /// <summary>
+    /// An aggregate with no id on its events is bound from the stream key: created with
+    /// <c>LoadOrCreateAsync</c>, saved, and loaded back with the same id — which is what a later save
+    /// needs to land on the same stream.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_stream_bound_aggregate_round_trips_its_id_through_the_stream_key()
+    {
+        var (repository, _, _) = this.Repository();
+
+        var created = await repository.LoadOrCreateAsync<StreamBoundWidget>("sb-1");
+        created.Tick(1);
+        await repository.SaveAsync(created);
+
+        var loaded = await repository.LoadAsync<StreamBoundWidget>("sb-1");
+
+        loaded!.Id.Should().Be("sb-1", "LoadAsync binds the id it loaded by");
+        loaded.Ticks.Should().Be(1);
+
+        loaded.Tick(2);
+        (await repository.SaveAsync(loaded)).Should().Be(2);
+    }
+
+    /// <summary>
+    /// ExecuteAsync against the real store: two commands, the second deciding against the first's
+    /// saved state.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Execute_runs_commands_against_the_real_store()
+    {
+        var (repository, _, _) = this.Repository();
+
+        await repository.ExecuteAsync<StreamBoundWidget, int>("sb-2", w => { w.Tick(1); return AggregateDecision<int>.Done(w.Ticks); });
+        var second = await repository.ExecuteAsync<StreamBoundWidget, int>("sb-2", w => { w.Tick(2); return AggregateDecision<int>.Done(w.Ticks); });
+
+        second.Should().Be(new CommandResult<int>(2, 2));
+    }
+
+    /// <summary>Saving an aggregate nobody bound would write to <c>es:{Name}:</c>; it is refused instead.</summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Saving_an_unbound_aggregate_is_refused()
+    {
+        var (repository, _, _) = this.Repository();
+
+        var widget = new StreamBoundWidget();
+        widget.Tick(1);
+
+        var act = async () => await repository.SaveAsync(widget);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*has no id*");
     }
 
     /// <summary>The Redis key an aggregate's history lives under, for raw <c>XLEN</c> assertions.</summary>
