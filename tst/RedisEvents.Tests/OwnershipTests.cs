@@ -428,6 +428,41 @@ public sealed class OwnershipTests(RedisStreamsFixture fixture)
         await leaving.DisposeAsync();
     }
 
+    /// <summary>
+    /// R-31 — a pod shut down on an already-cancelled token still releases. The release used to
+    /// early-return on a cancelled token, which is exactly the token a host stopping under SIGTERM
+    /// hands it: the claim and the presence field then survived until the TTL lapsed, and a
+    /// successor pod read the departed instance as a live second writer for that whole window.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_stop_on_an_already_cancelled_token_still_drops_the_claims_and_the_presence_field()
+    {
+        var topic = fixture.NewTopic("release-cancelled");
+        var consumer = fixture.NewConsumer("release-cancelled");
+        var key = Key(topic, consumer);
+
+        var leaving = this.Registry(topic, consumer, OwnedRange(index: 0, count: 1), "deploy-abc12-leaving", logger: null);
+        await leaving.StartAsync(TestContext.Current.CancellationToken);
+
+        (await this.Db.HashExistsAsync(key, OwnershipRegistry.PresenceField(leaving.InstanceId)))
+            .Should().BeTrue("the instance is running, so it is present");
+
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        await leaving.StopAsync(cancelled.Token);
+
+        (await this.Db.HashExistsAsync(key, OwnershipRegistry.PresenceField(leaving.InstanceId)))
+            .Should().BeFalse(
+                "a departing pod that stays 'present' for a whole TTL is read as a live rival by the pod replacing it");
+
+        OwnershipRegistry.ReadOwners(await this.Db.HashGetAllAsync(key))
+            .Should().BeEmpty("its partition claims go with it, so the successor does not wait out the TTL to take them");
+
+        await leaving.DisposeAsync();
+    }
+
     private IDatabase Db => fixture.Db;
 
     private static RedisKey Key(string topic, string consumer) => StreamKeys.Ownership(topic, consumer);
