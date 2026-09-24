@@ -4,6 +4,15 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-24 (2)
+
+### Added
+
+- **`TopicForwarder`** (`RedisEvents.Producer`) — republishes events from one topic onto another
+  exactly once in effect, with a per-source high-water mark and a dedupe marker written in the same
+  `MULTI`/`EXEC` as the publish. Upstreamed from a consumer's hand-rolled transactions outbox. See
+  the core README's *Forwarding one topic onto another*.
+
 ## 2026-09-24
 
 ### Added
