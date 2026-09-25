@@ -4,6 +4,38 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-09-25
+
+### Fixed
+
+- **A contested stand-down no longer strands a partition for the life of the process, and no longer
+  fires on an ordinary rolling deploy.** In `InstanceMode.Static` — the default — a `Deployment`
+  rolling over surges to two pods of one ordinal, both of which hold a live presence claim and flush
+  the same position. The id tiebreak stood one of them down on the first sight of that, landing on
+  the *incoming* pod about half the time; the latch was never cleared, so the surviving pod stayed
+  `Ready` and read nothing until an operator restarted it. The Lease-mode claim guard added in
+  0.2.15 does not cover this shape, because under Static both instances rewrite the claim field and
+  it proves nothing.
+  - `ConsumerOptions.ContestedGraceSeconds` (default 60) — under Static, an overlap must persist
+    this long before anybody stands down. A handover ends when the predecessor exits; a wrong
+    instance count does not. An overlap that outlives the window is judged exactly as before, by the
+    same tiebreak, so a genuine second writer still ends with one side stopped. Set it to 0 for the
+    previous behaviour. Lease mode ignores it — there the claim settles the question outright.
+  - `ConsumerOptions.ContestedRecheckSeconds` (default 30) — a stood-down partition re-probes the
+    presence field of the instance it stood down for, and when that instance is gone from the
+    ownership hash the consumer restarts its read side and reads the partition again. The evidence
+    is the same evidence the stand-down used, so this admits no writer a first flush arriving at
+    that moment would not have admitted. Bounded to five recoveries per host. Set it to 0 to keep a
+    stand-down permanent.
+  - A partition that stays stood down now logs at Warning on every re-check instead of once, so an
+    overlap that really is a misconfiguration keeps saying so.
+- **A pod shut down on an already-cancelled token now releases its ownership claims.**
+  `OwnershipRegistry`'s release early-returned when the caller's token was already cancelled — which
+  is the token a host stopping under SIGTERM hands it — so the departing instance's claim and
+  presence fields survived until their TTL lapsed and its successor read it as a live second writer
+  for that whole window. The release is one compare-and-delete round trip and no longer takes a
+  token.
+
 ## 2026-09-24 (2)
 
 ### Added

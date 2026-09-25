@@ -60,6 +60,9 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     private readonly IHostApplicationLifetime? lifetime;
     private readonly IPositionStore? positionStoreOverride;
     private readonly ILogger log;
+    /// <summary>How many times one host will restart its read side to recover a contested stand-down.</summary>
+    private const int MaxRecoveries = 5;
+
     private readonly List<PartitionRunner> runners = [];
     private readonly List<StreamPartitionMonitor> monitors = [];
     private readonly List<Task> groupReads = [];
@@ -93,6 +96,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     private OwnershipRegistry? ownership;
     private StreamReaderConnection? reader;
     private Task[]? workers;
+    private int recoveries;
+
     private bool disposed;
     private bool holdsSampler;
     private bool stopping;
@@ -480,7 +485,12 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 instanceId: default,
                 onContested: this.OnPartitionContested,
                 resets: resets,
-                exclusiveClaims: (this.consumer.Instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease);
+                exclusiveClaims: (this.consumer.Instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease,
+                contestedGrace: TimeSpan.FromSeconds(Math.Max(0, this.consumer.ContestedGraceSeconds)),
+                onRecovered: this.OnPartitionRecovered,
+                recheckInterval: this.consumer.ContestedRecheckSeconds > 0
+                    ? TimeSpan.FromSeconds(this.consumer.ContestedRecheckSeconds)
+                    : null);
 
             this.flusher.Start();
         }
@@ -1878,6 +1888,150 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
             runner.Stop();
             return;
+        }
+    }
+
+    /// <summary>
+    /// Brings the read side back up after the instance a partition stood down for has left the
+    /// ownership hash.
+    /// </summary>
+    /// <param name="partition">The partition that may be read again.</param>
+    /// <param name="theirs">The instance it had stood down for.</param>
+    /// <remarks>
+    /// <para>
+    /// Fire-and-forget for the same reason <see cref="OnLeaseChanged"/> is: this runs on the
+    /// flusher's timer, and a restart of the read side costs a whole drain budget.
+    /// </para>
+    /// <para>
+    /// Bounded. Each recovery restarts the read side, and a contender whose presence field flaps —
+    /// a Redis partition, a registry that stops renewing and starts again — could otherwise drive
+    /// that in a loop. After <see cref="MaxRecoveries"/> the host stops trying and leaves the
+    /// partition stopped for the health check to escalate, which is the behaviour this whole path
+    /// replaces and so is no worse than not having it.
+    /// </para>
+    /// </remarks>
+    private void OnPartitionRecovered(int partition, Guid theirs)
+    {
+        if (this.stopping || this.disposed || this.cts is null)
+        {
+            return;
+        }
+
+        if (Interlocked.Increment(ref this.recoveries) > MaxRecoveries)
+        {
+            this.log.LogError(
+                "Streams: partition {Partition} of topic {Topic} consumer {Consumer} has already been recovered from a " +
+                "contested stand-down {Max} times, so this instance stops trying; the contender's presence claim is " +
+                "flapping and a restart is the fix. Check STREAMS_INSTANCE_COUNT against spec.replicas.",
+                partition,
+                this.consumer.Topic,
+                this.consumerName,
+                MaxRecoveries);
+            return;
+        }
+
+        this.log.LogWarning(
+            "Streams: consumer {Consumer} on topic {Topic} is restarting its read side — partition {Partition} stood down " +
+            "for instance {Theirs}, which is gone.",
+            this.consumerName,
+            this.consumer.Topic,
+            partition,
+            theirs);
+
+        _ = Task.Run(this.RecoverReadSideAsync, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Restarts the read side on the partitions this instance already owns, so a partition stood
+    /// down mid-run is read again.
+    /// </summary>
+    /// <returns>A task that completes when the read side is back up.</returns>
+    /// <remarks>
+    /// Stop-then-start over the whole read side, not a surgical restart of one runner: the flusher,
+    /// the monitors and the runners are built together by
+    /// <see cref="StartReadSideAsync(int[], TopicOptions, IDatabase, CancellationToken)"/> and
+    /// rebuilding them is the path a lease rebalance already exercises. It also clears the
+    /// stand-down state itself — the new flusher's latches and the new monitors' stop marks start
+    /// clean — so there is nothing to unwind by hand. Serialised on the same gate as a rebalance,
+    /// so the two cannot interleave.
+    /// </remarks>
+    private async Task RecoverReadSideAsync()
+    {
+        await this.rebalanceGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+
+        try
+        {
+            if (this.stopping || this.disposed || this.cts is not { } source)
+            {
+                return;
+            }
+
+            int[] owned = [.. this.OwnedPartitions];
+
+            if (owned.Length == 0)
+            {
+                return;
+            }
+
+            var budget = TimeSpan.FromSeconds(this.consumer.ShutdownTimeoutSeconds > 0
+                ? this.consumer.ShutdownTimeoutSeconds
+                : 10);
+
+            await this.StopReadSideAsync(budget, CancellationToken.None).ConfigureAwait(false);
+
+            var topicOptions = StreamConfigBinder.ResolveTopic(this.options, this.consumer.Topic, this.log);
+            var redis = this.connection.Connection;
+
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    await this.StartReadSideAsync(owned, topicOptions, redis.GetDatabase(), source.Token)
+                        .ConfigureAwait(false);
+
+                    this.log.LogInformation(
+                        "Streams: consumer {Consumer} on topic {Topic} is reading partitions {Owned} again after a contested " +
+                        "stand-down cleared.",
+                        this.consumerName,
+                        this.consumer.Topic,
+                        string.Join(',', owned));
+                    return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && attempt < 3)
+                {
+                    this.log.LogWarning(
+                        ex,
+                        "Streams: consumer {Consumer} on topic {Topic} could not restart its read side on partitions {Owned} " +
+                        "after a contested stand-down cleared (attempt {Attempt}); retrying.",
+                        this.consumerName,
+                        this.consumer.Topic,
+                        string.Join(',', owned),
+                        attempt);
+
+                    await Task.Delay(TimeSpan.FromSeconds(2), source.Token).ConfigureAwait(false);
+                    await this.StopReadSideAsync(budget, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The host is stopping; there is nothing left to read.
+        }
+        catch (Exception ex)
+        {
+            this.log.LogCritical(
+                ex,
+                "Streams: consumer {Consumer} on topic {Topic} could not restart its read side after a contested stand-down " +
+                "cleared, so it reads nothing and nothing will notify it again. Stopping the application: a restart is the " +
+                "only way back.",
+                this.consumerName,
+                this.consumer.Topic);
+
+            this.lifetime?.StopApplication();
+        }
+        finally
+        {
+            this.rebalanceGate.Release();
         }
     }
 

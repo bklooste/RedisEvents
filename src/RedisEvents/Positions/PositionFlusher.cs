@@ -29,6 +29,20 @@ namespace RedisEvents.Positions;
 internal delegate void PartitionContestedCallback(int partition, Guid mine, Guid theirs);
 
 /// <summary>
+/// Raised when a partition stood down under <see cref="PartitionContestedCallback"/> can be picked
+/// up again: the instance it stood down for is no longer present in the ownership hash.
+/// </summary>
+/// <remarks>
+/// The host binds this to "bring the read side back up". The evidence is the same evidence the
+/// stand-down itself used — the rival's presence field — so resuming cannot admit a second writer
+/// the original decision would have tolerated: a contender that is gone from the hash is exactly
+/// the contender <see cref="PositionFlusher.NoteStale"/> already declines to stand down for.
+/// </remarks>
+/// <param name="partition">The partition that may resume.</param>
+/// <param name="theirs">The contender this instance had stood down for.</param>
+internal delegate void PartitionRecoveredCallback(int partition, Guid theirs);
+
+/// <summary>
 /// Coalesces per-partition positions for one consumer and writes the dirty ones in a single
 /// <c>HSET</c> on a timer.
 /// </summary>
@@ -97,6 +111,18 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// </summary>
     private readonly bool exclusiveClaims;
 
+    /// <summary>
+    /// How long an overlap must persist before a Static-mode instance acts on it. A rolling deploy
+    /// surges to two pods of one ordinal for a few seconds; a misconfigured replica count does not
+    /// go away. <see cref="TimeSpan.Zero"/> restores the act-on-first-sight behaviour.
+    /// </summary>
+    private readonly TimeSpan contestedGrace;
+
+    /// <summary>Flush ticks between re-arbitrations of a stood-down partition; 0 disables them.</summary>
+    private readonly int recheckTicks;
+
+    private readonly PartitionRecoveredCallback? onRecovered;
+
     private readonly KeyValuePair<string, object?> topicTag;
     private readonly KeyValuePair<string, object?> consumerTag;
 
@@ -119,6 +145,16 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private readonly int[] stopped;
     private readonly int[] reported;
     private readonly int[] counted;
+
+    // contestedSince is the Stopwatch timestamp of the first overlap seen on a partition that the
+    // claim could not exonerate, and 0 when the partition is clean; contenders is the id a
+    // stood-down partition is waiting on, so the re-arbitration knows whose presence to re-probe.
+    private readonly long[] contestedSince;
+    private readonly Guid[] contenders;
+
+    // Scratch for the re-arbitration probe. Its own array rather than foreignPartitions: that one
+    // belongs to the flush path and is only safe under flushGate, which this does not take.
+    private readonly int[] recheckPartitions;
 
     // Scratch for the second-writer check, sized to the partition count and reused: a flush that
     // finds no foreign id touches none of it. Only ever read on the flush path, which flushGate
@@ -144,7 +180,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private long flushes;
     private long failures;
     private long resetsApplied;
+    private long recoveries;
     private int ticks;
+    private int recheckCountdown;
 
     private CancellationTokenSource? cts;
     private Task? loop;
@@ -185,6 +223,23 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// field names its one holder and a live writer that is not that holder is a late flush, not a
     /// rival. False (Static) keeps the id tiebreak as the only judge.
     /// </param>
+    /// <param name="contestedGrace">
+    /// How long an overlap the claim could not exonerate must persist before this instance acts on
+    /// it, from <c>ConsumerOptions.ContestedGraceSeconds</c>. Only consulted when
+    /// <paramref name="exclusiveClaims"/> is false: under Lease the claim settles it outright and no
+    /// timer is needed. <see cref="TimeSpan.Zero"/> (the default here, so no existing caller changes
+    /// behaviour) acts on the first sight of the overlap.
+    /// </param>
+    /// <param name="onRecovered">
+    /// Invoked once per partition when a stood-down partition's contender has left the ownership
+    /// hash, so the partition can be read again. Expected to bring the read side back up. Pass
+    /// <see langword="null"/> — as the default does — and a stand-down stays permanent.
+    /// </param>
+    /// <param name="recheckInterval">
+    /// How often a stood-down partition re-probes its contender, rounded to whole flush ticks. Only
+    /// a flusher with a stood-down partition pays anything for it. <see langword="null"/> or
+    /// non-positive disables re-arbitration entirely.
+    /// </param>
     internal PositionFlusher(
         IPositionStore store,
         string topic,
@@ -197,7 +252,10 @@ internal sealed class PositionFlusher : IAsyncDisposable
         PartitionContestedCallback? onContested = null,
         ResetSignal? resets = null,
         TimeSpan? resetPollInterval = null,
-        bool exclusiveClaims = false)
+        bool exclusiveClaims = false,
+        TimeSpan contestedGrace = default,
+        PartitionRecoveredCallback? onRecovered = null,
+        TimeSpan? recheckInterval = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
@@ -213,6 +271,8 @@ internal sealed class PositionFlusher : IAsyncDisposable
         this.log = log;
         this.onContested = onContested;
         this.exclusiveClaims = exclusiveClaims;
+        this.contestedGrace = contestedGrace > TimeSpan.Zero ? contestedGrace : TimeSpan.Zero;
+        this.onRecovered = onRecovered;
 
         this.instanceId = instanceId != Guid.Empty
             ? instanceId
@@ -238,6 +298,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
         this.foreignPartitions = new int[partitionCount];
         this.foreignRecords = new PositionRecord[partitionCount];
         this.rewound = new int[partitionCount];
+        this.contestedSince = new long[partitionCount];
+        this.contenders = new Guid[partitionCount];
+        this.recheckPartitions = new int[partitionCount];
         this.buffer = new (int, StreamId)[partitionCount];
 
         Array.Fill(this.pendingSeq, Unwritten);
@@ -249,6 +312,14 @@ internal sealed class PositionFlusher : IAsyncDisposable
         this.resetFields = this.resets is null ? [] : ResetMarkers.Fields(this.resetPartitions);
         this.resetClearFields = new RedisValue[this.resetPartitions.Length];
         this.resetBuffer = new ResetMarker[this.resetPartitions.Length];
+
+        // Re-arbitration rides the same timer as everything else: a whole tick is the smallest unit
+        // this loop has, and a probe more often than a flush would only ask Redis the same question
+        // twice with nothing having moved between.
+        this.recheckTicks = recheckInterval is { } recheck && recheck > TimeSpan.Zero && onRecovered is not null
+            ? (int)Math.Clamp(Math.Round(recheck.TotalMilliseconds / interval.TotalMilliseconds), 1, int.MaxValue)
+            : 0;
+        this.recheckCountdown = this.recheckTicks;
 
         var pollEvery = resetPollInterval ?? interval;
         this.resetPollTicks = pollEvery <= interval
@@ -287,6 +358,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// misconfiguration from both sides, and only one of them stands down.
     /// </summary>
     internal int ContentionCount => Volatile.Read(ref this.contentionCount);
+
+    /// <summary>Stood-down partitions this flusher has taken back after their contender left.</summary>
+    internal long Recoveries => Interlocked.Read(ref this.recoveries);
 
     /// <summary>Reset markers this flusher has handed to a read loop and then cleared.</summary>
     internal long ResetsApplied => Interlocked.Read(ref this.resetsApplied);
@@ -635,6 +709,14 @@ internal sealed class PositionFlusher : IAsyncDisposable
             // Unattributed is not evidence of a second writer, so it is left alone.
             if (record.InstanceId == Guid.Empty || record.InstanceId == this.instanceId)
             {
+                if (record.InstanceId == this.instanceId)
+                {
+                    // Our own id came back out of the field: whatever overlap the grace clock was
+                    // timing has stopped. Reset it, or a brand new overlap months later would be
+                    // judged against a timestamp from this one and lose its grace.
+                    Volatile.Write(ref this.contestedSince[this.buffer[i].Partition], 0L);
+                }
+
                 continue;
             }
 
@@ -729,6 +811,18 @@ internal sealed class PositionFlusher : IAsyncDisposable
                 continue;
             }
 
+            // Static mode, where the claim cannot exonerate anyone. Two same-ordinal replicas both
+            // HSET the partition's claim every cycle, so the field names whichever wrote last and
+            // proves nothing about who should be reading — which is why the check above is
+            // Lease-only. What does separate the two cases is time: a rolling deploy's overlap is
+            // the surge window of one Deployment and ends when the predecessor exits, while a
+            // misconfigured replica count does not end at all. So an overlap the claim could not
+            // settle has to persist before this instance acts on it.
+            if (!this.exclusiveClaims && this.WithinGrace(partition, other))
+            {
+                continue;
+            }
+
             if (this.instanceId.CompareTo(other.InstanceId) < 0)
             {
                 this.Hold(partition, other);
@@ -737,6 +831,182 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
             this.Contest(partition, other);
         }
+    }
+
+    /// <summary>
+    /// Whether a Static-mode overlap is still inside its grace window, and so must not be acted on
+    /// yet.
+    /// </summary>
+    /// <param name="partition">The partition.</param>
+    /// <param name="other">The record found in the field before our write.</param>
+    /// <returns><see langword="true"/> to defer the verdict to a later flush.</returns>
+    /// <remarks>
+    /// <para>
+    /// This delays a stand-down; it never cancels one. An overlap that outlives the window is judged
+    /// exactly as it was before, by the same tiebreak, so a genuine second writer still ends with
+    /// one side stopped and the pair cannot both keep the partition.
+    /// </para>
+    /// <para>
+    /// What it costs is a bounded extension of a window that already exists: from the first flush
+    /// that sees the overlap to the window's end, both instances write the position and messages are
+    /// processed twice. That is the same at-least-once exposure the overlap itself creates, capped
+    /// by the option, and it buys the far worse failure — a partition read by nobody — not happening
+    /// on every rolling deploy.
+    /// </para>
+    /// </remarks>
+    private bool WithinGrace(int partition, PositionRecord other)
+    {
+        if (this.contestedGrace <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var since = Interlocked.CompareExchange(ref this.contestedSince[partition], now, 0L);
+
+        if (since == 0L)
+        {
+            this.log?.LogWarning(
+                "Streams: partition {Partition} of topic {Topic} consumer {Consumer} carried a position written by live " +
+                "instance {Other}. On a rolling deploy that is the outgoing pod and it ends when the pod does, so this " +
+                "instance keeps the partition for up to {GraceSeconds}s before deciding. If it is still there after that, " +
+                "the instance count really is wrong.",
+                partition,
+                this.topic,
+                this.consumer,
+                other.InstanceId.ToString("D", CultureInfo.InvariantCulture),
+                (long)this.contestedGrace.TotalSeconds);
+
+            return true;
+        }
+
+        return Stopwatch.GetElapsedTime(since, now) < this.contestedGrace;
+    }
+
+    /// <summary>
+    /// Re-probes the contenders that stood partitions down, and resumes any partition whose
+    /// contender has left the ownership hash.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A task that completes once every stood-down partition has been re-arbitrated.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The safety property.</b> The stand-down exists so that two instances never advance one
+    /// stored position. The only evidence it ever had for "there are two of us" is the contender's
+    /// presence field, and this asks precisely that field again. A contender whose presence field is
+    /// gone has either released it on shutdown or let it lapse past its TTL without a renewal — the
+    /// same condition under which <see cref="NoteStale"/> already declines to stand down in the
+    /// first place. Resuming on it therefore admits no writer that a first flush arriving at this
+    /// moment would not have admitted; it makes the rule "stopped while a second writer is live"
+    /// instead of "stopped forever because one once was".
+    /// </para>
+    /// <para>
+    /// Everything else fails closed. A probe that throws resumes nothing. A contender still present
+    /// resumes nothing and is logged again, so an overlap that really is a misconfiguration keeps
+    /// saying so instead of falling silent after its one line.
+    /// </para>
+    /// </remarks>
+    internal async ValueTask RecheckAsync(CancellationToken ct)
+    {
+        var db = this.redis?.GetDatabase();
+        if (db is null || this.onRecovered is null)
+        {
+            return;
+        }
+
+        var waiting = 0;
+        for (var partition = 0; partition < this.stopped.Length; partition++)
+        {
+            if (Volatile.Read(ref this.stopped[partition]) != 0 && this.contenders[partition] != Guid.Empty)
+            {
+                this.recheckPartitions[waiting++] = partition;
+            }
+        }
+
+        if (waiting == 0)
+        {
+            return;
+        }
+
+        RedisValue[] live;
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var fields = new RedisValue[waiting];
+            for (var i = 0; i < waiting; i++)
+            {
+                fields[i] = OwnershipRegistry.PresenceField(this.contenders[this.recheckPartitions[i]]);
+            }
+
+            live = await db.HashGetAsync(this.ownershipKey, fields).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Fail closed: an unanswerable question is not evidence that the contender has gone.
+            this.log?.LogWarning(
+                ex,
+                "Streams: could not re-check whether the instance that stood a partition of topic {Topic} consumer " +
+                "{Consumer} down is still live; the partition stays stopped and the next tick asks again.",
+                this.topic,
+                this.consumer);
+            return;
+        }
+
+        for (var i = 0; i < waiting && i < live.Length; i++)
+        {
+            var partition = this.recheckPartitions[i];
+            var contender = this.contenders[partition];
+
+            if (!live[i].IsNull)
+            {
+                this.log?.LogWarning(
+                    "Streams: partition {Partition} of topic {Topic} consumer {Consumer} is still stood down — instance " +
+                    "{Other} holds a live presence claim and is presumed to be writing it. This instance resumes the " +
+                    "partition as soon as that instance is gone.",
+                    partition,
+                    this.topic,
+                    this.consumer,
+                    contender.ToString("D", CultureInfo.InvariantCulture));
+                continue;
+            }
+
+            this.Resume(partition, contender);
+        }
+    }
+
+    /// <summary>Clears a stand-down whose contender has gone, and asks the host to read again.</summary>
+    /// <param name="partition">The partition to resume.</param>
+    /// <param name="contender">The instance it had stood down for.</param>
+    private void Resume(int partition, Guid contender)
+    {
+        if (Interlocked.Exchange(ref this.stopped[partition], 0) == 0)
+        {
+            return;
+        }
+
+        this.contenders[partition] = Guid.Empty;
+        Volatile.Write(ref this.contestedSince[partition], 0L);
+        _ = Interlocked.Exchange(ref this.reported[partition], ReportedNothing);
+        _ = Interlocked.Decrement(ref this.contestedCount);
+        Interlocked.Increment(ref this.recoveries);
+
+        if (Interlocked.Exchange(ref this.counted[partition], 0) == 1)
+        {
+            StreamsDiagnostics.SetContestedPartitions(this.metricKey, Interlocked.Decrement(ref this.contentionCount));
+        }
+
+        this.log?.LogWarning(
+            "Streams: partition {Partition} of topic {Topic} consumer {Consumer} is resuming — instance {Other}, which it " +
+            "stood down for, no longer holds a presence claim, so there is no second writer left to fight. This is the " +
+            "normal end of a rolling deploy that overlapped two pods of one ordinal.",
+            partition,
+            this.topic,
+            this.consumer,
+            contender.ToString("D", CultureInfo.InvariantCulture));
+
+        this.onRecovered?.Invoke(partition, contender);
     }
 
     /// <summary>
@@ -849,6 +1119,10 @@ internal sealed class PositionFlusher : IAsyncDisposable
             Interlocked.Decrement(ref this.dirtyCount);
         }
 
+        // Recorded before anything is logged: the re-arbitration reads it to know whose presence
+        // field to re-probe, and a stand-down with no contender recorded can never be undone.
+        this.contenders[partition] = other.InstanceId;
+
         this.CountContention(partition);
         _ = Interlocked.Increment(ref this.contestedCount);
         _ = Interlocked.Exchange(ref this.reported[partition], ReportedContention);
@@ -887,6 +1161,14 @@ internal sealed class PositionFlusher : IAsyncDisposable
                 {
                     this.ticks = 0;
                     await this.PollResetsAsync(ct).ConfigureAwait(false);
+                }
+
+                // Also outside the dirty check, and for the same reason turned around: a stood-down
+                // partition records nothing, so it is never dirty and would never be looked at again.
+                if (this.recheckTicks > 0 && Volatile.Read(ref this.contestedCount) != 0 && --this.recheckCountdown <= 0)
+                {
+                    this.recheckCountdown = this.recheckTicks;
+                    await this.RecheckAsync(ct).ConfigureAwait(false);
                 }
             }
         }

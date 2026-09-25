@@ -131,6 +131,156 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// The Static-mode shape of R-31, and the one the Lease-only guard from #20 never covered: a
+    /// <c>Deployment</c> with one replica rolling over surges to two pods that are both ordinal 0, so
+    /// both legitimately claim partition 0 and both flush its position for the length of the
+    /// handover. Standing down on the first sight of that is a coin flip that lands on the
+    /// <em>incoming</em> pod half the time, and the incoming pod is the one that has to still be
+    /// reading in a minute. So a Static overlap has to outlive its grace window before anybody acts
+    /// on it, and the handover does not.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_static_rolling_deploy_overlap_inside_the_grace_window_stands_nobody_down()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var topic = fixture.NewTopic("static-rollover");
+        var consumer = fixture.NewConsumer("static-rollover");
+
+        // Two pod names of one Deployment's rollout. Both are ordinal 0 — that is what a surge is —
+        // so both hold a live presence claim and both rewrite partition 0's claim every cycle, which
+        // is precisely why the claim field cannot tell this from a wrong replica count.
+        await using var outgoing = fixture.AsInstance("svc-6b9c4f-oldpd");
+        await using var incoming = fixture.AsInstance("svc-7d4f8b-newpd");
+
+        await using var ownOut = this.Registry(topic, consumer, outgoing);
+        await using var ownIn = this.Registry(topic, consumer, incoming);
+        await ownOut.StartAsync(ct);
+        await ownIn.StartAsync(ct);
+
+        var contestedOut = new List<int>();
+        var contestedIn = new List<int>();
+
+        var grace = TimeSpan.FromMinutes(5);
+        await using var flushOut = this.Flusher(topic, consumer, outgoing, (p, _, _) => contestedOut.Add(p), contestedGrace: grace);
+        await using var flushIn = this.Flusher(topic, consumer, incoming, (p, _, _) => contestedIn.Add(p), contestedGrace: grace);
+
+        // The overlap, in the order a rollout produces it: the outgoing pod is still draining while
+        // the incoming one starts reading, so each writes over the other's id.
+        flushOut.Record(0, new StreamId(1000, 0));
+        await flushOut.FlushAsync(ct);
+
+        flushIn.Record(0, new StreamId(1001, 0));
+        await flushIn.FlushAsync(ct);
+
+        flushOut.Record(0, new StreamId(1002, 0));
+        await flushOut.FlushAsync(ct);
+
+        flushIn.Record(0, new StreamId(1003, 0));
+        await flushIn.FlushAsync(ct);
+
+        flushIn.ContestedCount.Should().Be(
+            0,
+            "an overlap that has not outlived its grace window is a handover until proven otherwise, and the incoming pod " +
+            "is the one that has to still be reading afterwards");
+        flushOut.ContestedCount.Should().Be(0, "nor may the tiebreak stop the outgoing pod early and drop its drain");
+        contestedIn.Should().BeEmpty();
+        contestedOut.Should().BeEmpty();
+
+        // The rollout completes: the outgoing pod releases its claim and its presence field together.
+        await ownOut.StopAsync(ct);
+        await flushOut.DisposeAsync();
+
+        flushIn.Record(0, new StreamId(2000, 0));
+        await flushIn.FlushAsync(ct);
+
+        flushIn.ContestedCount.Should().Be(0, "the overlap ended the way a rollout's overlap ends");
+        contestedIn.Should().BeEmpty();
+
+        var stored = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        stored[0].Id.Should().Be(new StreamId(2000, 0), "the surviving pod is still reading the partition");
+        stored[0].InstanceId.Should().Be(incoming.InstanceId);
+    }
+
+    /// <summary>
+    /// The other half of R-31: a stand-down that <em>was</em> right when it was made must not outlive
+    /// the contender that caused it. With no grace at all — the pre-R-31 behaviour, and what a
+    /// service sets <c>ContestedGraceSeconds = 0</c> to get — the loser of the tiebreak stands the
+    /// partition down while both pods are live. When the contender then leaves the ownership hash,
+    /// the loser is the only instance left and must take the partition back, or a routine rollout
+    /// ends with a live, Ready pod that reads nothing until an operator restarts it.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_static_stand_down_resumes_once_its_contender_has_left_the_hash()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var topic = fixture.NewTopic("static-resume");
+        var consumer = fixture.NewConsumer("static-resume");
+
+        await using var podA = fixture.AsInstance("svc-a-0");
+        await using var podB = fixture.AsInstance("svc-b-0");
+
+        await using var ownA = this.Registry(topic, consumer, podA);
+        await using var ownB = this.Registry(topic, consumer, podB);
+        await ownA.StartAsync(ct);
+        await ownB.StartAsync(ct);
+
+        var recoveredA = new List<int>();
+        var recoveredB = new List<int>();
+
+        // contestedGrace stays at zero so the stand-down happens on the first sight of the overlap:
+        // this test is about what happens after one, not about deferring it.
+        await using var flushA = this.Flusher(topic, consumer, podA, null, onRecovered: (p, _) => recoveredA.Add(p));
+        await using var flushB = this.Flusher(topic, consumer, podB, null, onRecovered: (p, _) => recoveredB.Add(p));
+
+        flushA.Record(0, new StreamId(1000, 0));
+        await flushA.FlushAsync(ct);
+        flushB.Record(0, new StreamId(1001, 0));
+        await flushB.FlushAsync(ct);
+        flushA.Record(0, new StreamId(1002, 0));
+        await flushA.FlushAsync(ct);
+
+        var loserIsA = podA.InstanceId.CompareTo(podB.InstanceId) > 0;
+        var loser = loserIsA ? flushA : flushB;
+        var winner = loserIsA ? flushB : flushA;
+        var loserRegistry = loserIsA ? ownA : ownB;
+        var winnerRegistry = loserIsA ? ownB : ownA;
+        var loserRecovered = loserIsA ? recoveredA : recoveredB;
+
+        loser.ContestedCount.Should().Be(1, "with no grace the higher id stands down on the first sight of the overlap");
+
+        // Still contested: the winner has not gone anywhere, so a re-check must change nothing. This
+        // is the property that must not be weakened — recovery is evidence-driven, not a retry.
+        await loser.RecheckAsync(ct);
+
+        loser.ContestedCount.Should().Be(1, "the contender still holds a live presence claim, so there is still a second writer");
+        loser.Recoveries.Should().Be(0);
+        loserRecovered.Should().BeEmpty();
+
+        // The winner terminates, the way the pod that won the coin flip does at the end of a rollout.
+        await winnerRegistry.StopAsync(ct);
+        await winner.DisposeAsync();
+
+        await loser.RecheckAsync(ct);
+
+        loser.ContestedCount.Should().Be(0, "nothing is writing the partition any more, so nothing is left to stand down for");
+        loser.Recoveries.Should().Be(1);
+        loserRecovered.Should().Equal(new[] { 0 }, "the host is asked to read the partition again, exactly once");
+
+        // And the resumed instance really does write again: before R-31 this record was dropped on
+        // the floor by the latch for the life of the process.
+        loser.Record(0, new StreamId(5000, 0));
+        await loser.FlushAsync(ct);
+
+        var stored = await new RedisPositionStore(fixture.Redis).LoadRecordsAsync(topic, consumer, ct);
+        stored[0].Id.Should().Be(new StreamId(5000, 0), "the survivor is reading the partition again");
+        stored[0].InstanceId.Should().Be(loserIsA ? podA.InstanceId : podB.InstanceId);
+
+        await loserRegistry.StopAsync(ct);
+    }
+
+    /// <summary>
     /// The scenario customer-wallet-views' appsettings.json comment describes trying and abandoning
     /// on <c>Instances:Mode = Lease</c>: pod A gracefully releases the only partition, pod B claims
     /// it, and then A's last (delayed) position flush lands in the field <em>after</em> B has already
@@ -490,7 +640,9 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
         RedisStreamsFixture.StreamsInstance pod,
         PartitionContestedCallback? onContested,
         int partitions = 1,
-        bool exclusiveClaims = false)
+        bool exclusiveClaims = false,
+        TimeSpan contestedGrace = default,
+        PartitionRecoveredCallback? onRecovered = null)
         => new(
             new RedisPositionStore(pod.Redis, pod.InstanceId),
             topic,
@@ -501,7 +653,9 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
             pod.Redis,
             pod.InstanceId,
             onContested,
-            exclusiveClaims: exclusiveClaims);
+            exclusiveClaims: exclusiveClaims,
+            contestedGrace: contestedGrace,
+            onRecovered: onRecovered);
 
     private async Task<RunningConsumer> StartConsumerAsync(
         string topic,

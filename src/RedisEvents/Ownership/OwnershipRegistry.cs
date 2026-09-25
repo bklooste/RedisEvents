@@ -595,7 +595,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         this.renewals.Dispose();
         this.renewals = null;
 
-        await this.ReleaseAsync(ct).ConfigureAwait(false);
+        await this.ReleaseAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1130,13 +1130,22 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         }
     }
 
-    private async Task ReleaseAsync(CancellationToken ct)
+    /// <summary>
+    /// Drops this instance's claim and presence fields, so the next instance does not have to wait
+    /// out the TTL to see it go.
+    /// </summary>
+    /// <returns>A task that completes once the release has been attempted.</returns>
+    /// <remarks>
+    /// Deliberately takes no cancellation token. It used to take the caller's and return early when
+    /// it was already cancelled, which is exactly the shape a pod shutting down on a cancelled host
+    /// token has: the claim and — worse — the presence field then survived until the TTL lapsed, so
+    /// a successor read the departing instance as a live second writer for that whole window. This
+    /// is one round trip of a compare-and-delete script that only ever removes fields still holding
+    /// this instance's own value, and it is bounded by the multiplexer's own timeout, so there is
+    /// nothing for a cancelled token to save.
+    /// </remarks>
+    private async Task ReleaseAsync()
     {
-        if (ct.IsCancellationRequested)
-        {
-            return;
-        }
-
         var args = this.lease ? this.LeaseReleaseArgs() : this.releaseArgs;
 
         if (args.Length == 0)
