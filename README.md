@@ -50,9 +50,11 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   publisher (`IStreamBufferedPublisher`) that batches into background flushes for high-throughput,
   telemetry-shaped workloads — with an explicit, documented trade-off about what buffering can lose on
   a crash.
-- **Multi-instance ownership without a coordinator.** Partition ownership is computed from
-  `STREAMS_INSTANCE_INDEX` / `STREAMS_INSTANCE_COUNT` (or a StatefulSet pod ordinal) — no external
-  leader election, no split-brain window.
+- **Multi-instance ownership without a coordinator.** Partitions are claimed from the ownership
+  registry (`Instances:Mode = Lease`, the default) — no external leader election, no split-brain
+  window, and a plain `Deployment` scales. `Instances:Mode = Static` instead computes ownership from
+  `STREAMS_INSTANCE_INDEX` / `STREAMS_INSTANCE_COUNT` (or a StatefulSet pod ordinal), so it needs a
+  StatefulSet ordinal plus a `STREAMS_INSTANCE_COUNT` that tracks `spec.replicas`.
 - **Admin & operability built in.** `StreamAdmin` exposes position preview/reset and ownership
   inspection for runbooks; `RedisEvents.Web` adds ASP.NET Core health checks and optional
   minimal-API admin endpoints for the same operations, kept in a separate package so a headless worker

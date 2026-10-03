@@ -341,12 +341,20 @@ internal static class StreamConfigBinder
         // R-17 again, from the other side: in Lease mode nothing reads Count or Index — ownership is
         // claimed, and the live instance count is observed in the registry hash. Accepting them would
         // let a service declare a pool size that has no effect at all.
+        //
+        // Lease is the default now, so a Count or an Index with no Mode at all is almost certainly a
+        // config written when Static was the default rather than a deliberate Lease pool. Both are
+        // refused, but they are told apart: leaving it to default(InstanceMode) would silently flip
+        // such a config to Lease, and guessing Static back would contradict the documented default.
         if (instances.Mode == InstanceMode.Lease && (instances.Count is not null || instances.Index is not null))
         {
-            throw new StreamConfigurationException(
-                $"{key}:Mode is Lease, but {key}:Count / {key}:Index are set and Lease mode reads neither: it claims free partitions " +
-                "and counts the live instances out of the ownership hash, which is the drift these two keys cause in Static mode. " +
-                "Remove them, or set Mode to Static (the default) to keep the fixed assignment.");
+            throw new StreamConfigurationException(instances.ModeWasSetExplicitly
+                ? $"{key}:Mode is Lease, but {key}:Count / {key}:Index are set and Lease mode reads neither: it claims free partitions " +
+                  "and counts the live instances out of the ownership hash, which is the drift these two keys cause in Static mode. " +
+                  "Remove them, or set Mode to Static to keep the fixed assignment."
+                : $"{key}:Count / {key}:Index are set but {key}:Mode is not, and Mode now defaults to Lease, which reads neither. " +
+                  "Set Mode to Static explicitly to keep the fixed assignment these two keys describe, or remove them to take the " +
+                  "Lease default, where partitions are claimed from the ownership registry and no instance count is maintained.");
         }
 
         if (instances.Count is int count && count < 1)

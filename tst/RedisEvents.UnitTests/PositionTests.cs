@@ -511,7 +511,14 @@ public class PositionTests
 
         // The flusher notices the marker on its tick and publishes it to the signal.
         await Wait(() => signal.HasPending, "the reset became pending");
-        log.Entries.Should().Contain(e => e.Level == LogLevel.Warning && e.Message.Contains("reset marker found"));
+
+        // Waited for, not asserted directly: PositionFlusher calls signal.Request BEFORE it writes
+        // this warning, so "pending" does not imply "logged". Asserting straight after the pending
+        // wait passes on an idle machine and fails whenever the thread is preempted between those
+        // two statements — which is what a loaded CI runner does.
+        await Wait(
+            () => log.Entries.Any(e => e.Level == LogLevel.Warning && e.Message.Contains("reset marker found")),
+            "the reset marker was logged");
 
         // Standing in for the read loop, which is the only thing that can actually rewind a cursor.
         signal.TryTake(0, out var taken).Should().BeTrue();

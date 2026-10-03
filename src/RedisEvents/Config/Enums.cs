@@ -149,12 +149,19 @@ public enum ReadMode
 public enum InstanceMode
 {
     /// <summary>
-    /// Static mode — ownership is fixed based on StatefulSet ordinals (default).
+    /// Static mode — ownership is fixed based on StatefulSet ordinals. Requires a pod ordinal and a
+    /// hand-maintained <c>STREAMS_INSTANCE_COUNT</c>; must be asked for by name.
     /// </summary>
+    /// <remarks>
+    /// Zero stays Static for wire and configuration compatibility: the default is expressed in the
+    /// property initialisers (<see cref="InstanceOptions.Mode"/>,
+    /// <c>OwnershipRegistryOptions.Mode</c>), not by this enum's zero value.
+    /// </remarks>
     Static = 0,
 
     /// <summary>
-    /// Lease mode — ownership is claimed and released dynamically.
+    /// Lease mode (default) — ownership is claimed from the ownership registry and released
+    /// dynamically, so no instance count and no StatefulSet ordinal are needed.
     /// </summary>
     Lease = 1,
 }

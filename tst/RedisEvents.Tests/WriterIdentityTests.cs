@@ -612,6 +612,11 @@ public sealed class WriterIdentityTests(RedisStreamsFixture fixture)
                 Partitions = 1,
                 OwnedPartitions = [0],
                 PodName = pod.PodName,
+
+                // Static, explicitly: these are the two-live-writers and rolling-deploy scenarios,
+                // which only exist under a pre-assigned ownership. Lease is the default now, and a
+                // Lease registry refuses pre-assigned partitions.
+                Mode = InstanceMode.Static,
                 InstanceId = pod.InstanceId,
                 TtlSeconds = 30,
                 RenewSeconds = 10,

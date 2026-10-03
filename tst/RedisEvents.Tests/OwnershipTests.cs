@@ -524,6 +524,11 @@ public sealed class OwnershipTests(RedisStreamsFixture fixture)
                 Partitions = Partitions,
                 OwnedPartitions = range.ToArray(),
                 PodName = podName,
+
+                // These scenarios are all about Static: a pre-assigned range, and the gaps and
+                // overlaps the registry reports when the arithmetic behind it is wrong. Lease is the
+                // default now, and a Lease registry refuses pre-assigned partitions outright.
+                Mode = InstanceMode.Static,
                 InstanceId = instanceId ?? Guid.NewGuid(),
                 TtlSeconds = ttlSeconds,
                 RenewSeconds = renewSeconds,

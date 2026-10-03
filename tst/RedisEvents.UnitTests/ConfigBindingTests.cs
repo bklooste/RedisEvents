@@ -66,7 +66,7 @@ public class ConfigBindingTests
             "MaxIdleDelayMs": 25,
             "OnError": "StopPartition",
             "UnhealthyBlockSeconds": 90,
-            "Instances": { "Count": 3, "Index": 1 },
+            "Instances": { "Mode": "Static", "Count": 3, "Index": 1 },
             "ReaderThreads": 2,
             "ShutdownTimeoutSeconds": 30,
             "UnhealthyLagMs": 45000,
@@ -293,6 +293,46 @@ public class ConfigBindingTests
         message.Should().Contain("Streams:Consumers[0]:Instances:Index");
     }
 
+    /// <summary>
+    /// Lease is the default, so a <c>Count</c> or <c>Index</c> with no <c>Mode</c> is a config
+    /// written when Static was the default. It is refused with a message naming the new default,
+    /// rather than silently flipped to Lease or silently read back as Static.
+    /// </summary>
+    [Theory]
+    [InlineData("\"Count\": 2")]
+    [InlineData("\"Index\": 0")]
+    [Trait("TestType", "UnitTest")]
+    public void Validate_CountOrIndex_WithNoMode_IsRefusedAndNamesTheNewLeaseDefault(string keys)
+    {
+        var message = Throws($$"""
+        {
+          "Streams": {
+            "Consumers": [ { "Topic": "orders", "Instances": { {{keys}} } } ]
+          }
+        }
+        """).Message;
+
+        message.Should().Contain("Streams:Consumers[0]:Instances:Mode is not");
+        message.Should().Contain("defaults to Lease");
+        message.Should().Contain("Static");
+    }
+
+    /// <summary>Nothing configured at all binds the Lease default, and validates clean.</summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Bind_InstancesWithNoMode_DefaultsToLease()
+    {
+        var options = StreamConfigBinder.Bind(FromJson("""
+        { "Streams": { "Consumers": [ { "Topic": "orders", "Instances": { "LeaseTtlSeconds": 30 } } ] } }
+        """));
+
+        options.Consumers[0].Instances!.Mode.Should().Be(InstanceMode.Lease);
+
+        var act = () => StreamConfigBinder.Validate(options, Production, 5000, logger: null);
+
+        act.Should().NotThrow();
+    }
+
     [Theory]
     [InlineData("\"LeaseTtlSeconds\": 120, \"LeaseRenewSeconds\": 45")]
     [InlineData("\"LeaseTtlSeconds\": 120")]
@@ -361,7 +401,7 @@ public class ConfigBindingTests
         {
           "Streams": {
             "Consumers": [
-              { "Topic": "orders", "Instances": { "Count": 2, "Index": 0, "LeaseTtlSeconds": 30, "LeaseRenewSeconds": 10 } }
+              { "Topic": "orders", "Instances": { "Mode": "Static", "Count": 2, "Index": 0, "LeaseTtlSeconds": 30, "LeaseRenewSeconds": 10 } }
             ]
           }
         }

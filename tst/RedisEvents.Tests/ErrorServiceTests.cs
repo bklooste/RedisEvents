@@ -463,6 +463,11 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
             BatchSize = 1,
             UseConsumerGroup = true,
             Backpressure = new BackpressureOptions { Capacity = 1 },
+
+            // Static, explicitly: this scenario needs both instances reading the one partition so
+            // the consumer group can split the load between them. Under the Lease default exactly
+            // one of them would claim partition 0 and the other would read nothing.
+            Instances = new InstanceOptions { Mode = InstanceMode.Static },
         };
 
         var previousPod = Environment.GetEnvironmentVariable(InstanceResolver.PodNameVariable);
