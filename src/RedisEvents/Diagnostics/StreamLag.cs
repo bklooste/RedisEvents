@@ -210,6 +210,15 @@ internal sealed class StreamPartitionMonitor
     /// </summary>
     internal void MarkCaughtUp() => Volatile.Write(ref this.caughtUp, 1);
 
+    /// <summary>
+    /// True when the last fetch returned nothing and this partition is sitting at the tail.
+    /// </summary>
+    /// <remarks>
+    /// Read by <see cref="StreamStatus"/> so an external watchdog can tell a quiet topic from a
+    /// stalled one: a position that stands still while caught up is idle, not stuck.
+    /// </remarks>
+    internal bool IsCaughtUp => Volatile.Read(ref this.caughtUp) != 0;
+
     /// <summary>Records the entry count from a sample.</summary>
     /// <param name="entries">Entries behind the tail, or <c>-1</c> for unknown.</param>
     internal void SetLagEntries(long entries) => Volatile.Write(ref this.lagEntries, entries);
