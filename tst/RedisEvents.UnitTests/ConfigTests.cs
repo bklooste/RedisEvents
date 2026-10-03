@@ -96,6 +96,13 @@ public class ConfigTests
         consumer.BlockMs.Should().Be(1000);
         consumer.OnError.Should().Be(ErrorPolicy.BestEffort);
         consumer.Instances.Should().BeNull();
+
+        // Lease, not Static: the default lives in the property initialiser, and the enum's zero
+        // value (Static) deliberately no longer expresses it.
+        var instances = new InstanceOptions();
+        instances.Mode.Should().Be(InstanceMode.Lease);
+        instances.Count.Should().BeNull();
+        instances.Index.Should().BeNull();
         consumer.StartFromWhenMissing.Should().Be(StartFrom.Beginning);
         consumer.Backpressure.Enabled.Should().BeTrue();
         consumer.Backpressure.Capacity.Should().Be(4);
@@ -371,13 +378,13 @@ public class ConfigTests
     [Fact]
     [Trait("TestType", "UnitTest")]
     public void Validate_InstanceCountBelowOne_ThrowsNamingKey()
-        => Throws(WithConsumer(new ConsumerOptions { Topic = "orders", Instances = new InstanceOptions { Count = 0 } }))
+        => Throws(WithConsumer(new ConsumerOptions { Topic = "orders", Instances = new InstanceOptions { Mode = InstanceMode.Static, Count = 0 } }))
             .Message.Should().Contain("Streams:Consumers[0]:Instances:Count");
 
     [Fact]
     [Trait("TestType", "UnitTest")]
     public void Validate_InstanceIndexNegative_ThrowsNamingKey()
-        => Throws(WithConsumer(new ConsumerOptions { Topic = "orders", Instances = new InstanceOptions { Index = -1 } }))
+        => Throws(WithConsumer(new ConsumerOptions { Topic = "orders", Instances = new InstanceOptions { Mode = InstanceMode.Static, Index = -1 } }))
             .Message.Should().Contain("Streams:Consumers[0]:Instances:Index");
 
     [Fact]
@@ -387,7 +394,7 @@ public class ConfigTests
         var message = Throws(WithConsumer(new ConsumerOptions
         {
             Topic = "orders",
-            Instances = new InstanceOptions { Count = 2, Index = 2 },
+            Instances = new InstanceOptions { Mode = InstanceMode.Static, Count = 2, Index = 2 },
         })).Message;
 
         message.Should().Contain("Streams:Consumers[0]:Instances:Index");

@@ -147,12 +147,12 @@ internal sealed record OwnershipRegistryOptions
     public Guid InstanceId { get; init; } = OwnershipRegistry.StableInstanceId;
 
     /// <summary>
-    /// <see cref="InstanceMode.Static"/> (the default) reports the ownership the configured
-    /// arithmetic decided and flags disagreement; <see cref="InstanceMode.Lease"/> makes the
-    /// registry authoritative — it claims free partitions itself, and
-    /// <see cref="OwnershipRegistryOptions.OwnedPartitions"/> must be empty.
+    /// <see cref="InstanceMode.Lease"/> (the default) makes the registry authoritative — it claims
+    /// free partitions itself, and <see cref="OwnershipRegistryOptions.OwnedPartitions"/> must be
+    /// empty; <see cref="InstanceMode.Static"/> reports the ownership the configured arithmetic
+    /// decided and flags disagreement.
     /// </summary>
-    public InstanceMode Mode { get; init; } = InstanceMode.Static;
+    public InstanceMode Mode { get; init; } = InstanceMode.Lease;
 
     /// <summary>
     /// Called after a <see cref="InstanceMode.Lease"/> refresh that changed the held set — a
@@ -185,10 +185,10 @@ internal sealed record OwnershipRegistryOptions
 /// vanish. There are no heartbeat timestamps to parse and no read-side staleness filter to get wrong.
 /// </para>
 /// <para>
-/// <b>Two modes, one hash.</b> In <see cref="InstanceMode.Static"/> — the default, and what every
-/// service runs today — the registry is <em>observational</em>: it reports what the configured
-/// ownership arithmetic decided and flags disagreement, and never reassigns a partition. In
-/// <see cref="InstanceMode.Lease"/> it is <em>authoritative</em>: the drift above cannot happen,
+/// <b>Two modes, one hash.</b> In <see cref="InstanceMode.Static"/> — which must now be asked for
+/// by name — the registry is <em>observational</em>: it reports what the configured ownership
+/// arithmetic decided and flags disagreement, and never reassigns a partition. In
+/// <see cref="InstanceMode.Lease"/> — the default — it is <em>authoritative</em>: the drift above cannot happen,
 /// because nothing declares a <c>Count</c> at all — an instance claims free partitions with
 /// <c>HSETNX</c>, renews what it holds, drops what it fails to renew, and the live member count is
 /// read out of the hash. That is the mode to reach for when something actually scales past one

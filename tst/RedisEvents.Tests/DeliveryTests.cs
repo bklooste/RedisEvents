@@ -199,7 +199,7 @@ public sealed class DeliveryTests(RedisStreamsFixture fixture)
             Persist = PersistMode.AsyncBatch,
             PersistIntervalMs = 100,
             StartFrom = StartFrom.Beginning,
-            Instances = new InstanceOptions { Count = 2, Index = index },
+            Instances = new InstanceOptions { Mode = InstanceMode.Static, Count = 2, Index = index },
         };
 
         var first = new StreamConsumerHost(root, ForInstance(0), "s5-consumer", recorder.HandleAsync, connection, NullLogger.Instance);

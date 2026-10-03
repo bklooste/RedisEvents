@@ -4,6 +4,34 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-04
+
+### Changed — breaking (behaviour)
+
+- **Partition ownership now defaults to `InstanceMode.Lease` instead of `InstanceMode.Static`.** The
+  default moved in the property initialisers — `InstanceOptions.Mode`,
+  `OwnershipRegistryOptions.Mode`, and the consumer host's fallback when no `Instances` section is
+  configured at all. The enum is unchanged (`Static = 0`, `Lease = 1`) for wire and configuration
+  compatibility, so the default is no longer the enum's zero value; `InstanceOptions` tracks whether
+  `Mode` was assigned rather than inferring "unset" from `default(InstanceMode)`.
+  - **A deployment that was running Static silently becomes Lease on upgrade unless it sets
+    `Instances:Mode=Static` explicitly.** The exception is a config that also sets
+    `Instances:Count` or `Instances:Index`: those keys with no `Mode` are now refused at startup with
+    a message naming the new default, because Lease reads neither and quietly honouring either
+    reading would be worse than failing.
+  - The switch itself is safe. Lease claims are exclusive (`HSETNX` with a per-field TTL), so a
+    partition has one owner and nothing is processed twice; what changes is that ownership moves as
+    leases lapse rather than being fixed by arithmetic.
+  - A StatefulSet and `STREAMS_INSTANCE_COUNT` become unnecessary. Lease needs no pod ordinal and no
+    instance count, handles more pods than partitions and uneven pod/partition ratios, and
+    rebalances on its own — so a partitioned consumer can run on a plain `Deployment`, and the silent
+    drift between `STREAMS_INSTANCE_COUNT` and `spec.replicas` stops being reachable.
+  - One shape does need `Static` kept: a `UseConsumerGroup` consumer running more pods than
+    partitions, which relied on every pod owning every partition and letting the group split the
+    load. Under Lease exactly one pod claims the partition and the others read nothing.
+  - The two reasons Lease was not the default are both fixed: the late-flush guard (#20) and the
+    contested stand-down recheck (#32).
+
 ## 2026-09-25
 
 ### Fixed

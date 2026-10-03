@@ -17,9 +17,33 @@ public sealed record InstanceOptions
     public const int DefaultLeaseRenewSeconds = 10;
 
     /// <summary>
-    /// Instance mode for partition ownership: Static or Lease (default: Static).
+    /// Instance mode for partition ownership: Lease or Static (default: Lease).
     /// </summary>
-    public InstanceMode Mode { get; set; } = InstanceMode.Static;
+    /// <remarks>
+    /// Lease is the default because it needs neither a StatefulSet ordinal nor a hand-maintained
+    /// <c>STREAMS_INSTANCE_COUNT</c>, and drift between that count and <c>spec.replicas</c> is
+    /// silent — partitions consumed by nobody, or consumed twice. Static remains available and
+    /// must now be asked for by name.
+    /// </remarks>
+    public InstanceMode Mode
+    {
+        get => this.mode;
+        set
+        {
+            this.mode = value;
+            this.ModeWasSetExplicitly = true;
+        }
+    }
+
+    /// <summary>
+    /// True when <see cref="Mode"/> was assigned — by configuration binding or by hand — rather than
+    /// left at its default. Validation uses it to tell "this config asked for Lease" apart from
+    /// "this config predates Lease becoming the default", which <c>default(InstanceMode)</c> can no
+    /// longer express now that the enum's zero value and the property default differ.
+    /// </summary>
+    internal bool ModeWasSetExplicitly { get; private set; }
+
+    private InstanceMode mode = InstanceMode.Lease;
 
     /// <summary>
     /// Total number of instances in the pool (used in Static mode).

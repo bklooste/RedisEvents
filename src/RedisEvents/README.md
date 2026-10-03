@@ -653,10 +653,14 @@ trimming back for a lagging consumer, but it is **released above 80 %** of `MaxL
 whole Redis instance, and every other service on it, down with it. That release fires the
 `streams.clamp.released` metric; treat it as data loss that has already happened.
 
-### Scaling past one replica needs a StatefulSet
+### `Instances:Mode = Static` needs a StatefulSet
 
-A `Deployment` gives no stable ordinal, so every pod resolves to index 0, every pod owns every
-partition, and every message is processed N times. The ownership arithmetic is driven by
+`Lease` is the default: partitions are claimed from the ownership registry, so a plain `Deployment`
+scales and no instance count is maintained. `Static` needs a StatefulSet ordinal plus
+`STREAMS_INSTANCE_COUNT`, and must be asked for by name.
+
+Under `Static`, a `Deployment` gives no stable ordinal, so every pod resolves to index 0, every pod
+owns every partition, and every message is processed N times. The ownership arithmetic is driven by
 `STREAMS_INSTANCE_INDEX` (or the trailing `-<n>` of a StatefulSet `POD_NAME`) and
 `STREAMS_INSTANCE_COUNT`.
 
@@ -757,5 +761,5 @@ partition.
 | `streams.errors` | Handler failures, tagged by `policy` and `exception.type`. A `policy=best_effort` count is messages **skipped** |
 | `streams.blocked` | A partition is blocked on a `DontIgnoreException` and going nowhere |
 | `streams.clamp.released` | Trimming overran a lagging consumer — data has been lost |
-| `streams.partitions.unowned` | Partitions nobody is consuming; usually `STREAMS_INSTANCE_COUNT` drift |
+| `streams.partitions.unowned` | Partitions nobody is consuming; usually `STREAMS_INSTANCE_COUNT` drift under `Instances:Mode = Static` |
 | `streams.batch.duration` | Handler latency; the first thing to check when lag climbs |

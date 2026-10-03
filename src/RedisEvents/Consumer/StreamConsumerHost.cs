@@ -329,7 +329,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         await StreamAdmin.EnsureTopicAsync(redis, topic, topicOptions, this.log, cancellationToken).ConfigureAwait(false);
 
         var instances = this.consumer.Instances;
-        var leased = (instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease;
+        var leased = (instances?.Mode ?? InstanceMode.Lease) == InstanceMode.Lease;
         var identity = InstanceResolver.Resolve(instances, this.log);
         var podName = identity.PodName ?? Environment.MachineName;
 
@@ -485,7 +485,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 instanceId: default,
                 onContested: this.OnPartitionContested,
                 resets: resets,
-                exclusiveClaims: (this.consumer.Instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease,
+                exclusiveClaims: (this.consumer.Instances?.Mode ?? InstanceMode.Lease) == InstanceMode.Lease,
                 contestedGrace: TimeSpan.FromSeconds(Math.Max(0, this.consumer.ContestedGraceSeconds)),
                 onRecovered: this.OnPartitionRecovered,
                 recheckInterval: this.consumer.ContestedRecheckSeconds > 0
@@ -530,7 +530,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 // and reconnecting on every lease change would trade a socket for nothing. Sized for
                 // the worst case in Lease mode, where the partitions this instance holds — and so
                 // the number of read loops queued on this connection — moves with the pool.
-                var concurrentReads = (this.consumer.Instances?.Mode ?? InstanceMode.Static) == InstanceMode.Lease
+                var concurrentReads = (this.consumer.Instances?.Mode ?? InstanceMode.Lease) == InstanceMode.Lease
                     ? topicOptions.Partitions
                     : coLocated ? 1 : owned.Length;
 
