@@ -36,6 +36,23 @@ actually changed.
   for that whole window. The release is one compare-and-delete round trip and no longer takes a
   token.
 
+## 2026-10-03
+
+### Added
+
+- **`StreamStatus.Partitions()`** (`RedisEvents.Diagnostics`) — a public, read-only snapshot of every
+  partition this process reads: identity, run state and `StopReason`, `LastProcessed`, `IsCaughtUp`,
+  `LagEntries`/`LagMs`/`BlockedMs`/`StoppedMs`, and the consumer's own `Unhealthy*` thresholds. The
+  monitors behind it stay internal, so this is a copy and not a handle.
+
+  `StreamsHealthCheck` already graded these signals, but only for an ASP.NET `/health` endpoint. A
+  Generic Host worker has no endpoint, so a host that wanted to stop itself when a partition died had
+  to infer liveness from meter instrument names — which couples an operational decision to telemetry
+  series names and fails silently when one is renamed. `LastProcessed` and `IsCaughtUp` are the
+  fields that let a caller tell a stalled partition from one that is merely behind, which is the
+  difference between a restart that helps and a restart loop that makes the backlog worse. See the
+  core README's *Reading partition health in process*.
+
 ## 2026-09-24 (2)
 
 ### Added

@@ -717,6 +717,39 @@ return map.Unowned;
 
 ---
 
+## Reading partition health in process
+
+`RedisEvents.Web`'s `StreamsHealthCheck` grades every partition for an ASP.NET `/health` endpoint.
+A Generic Host worker has no such endpoint, and metrics are the wrong place to make a decision —
+so `StreamStatus` exposes the same signals the check reads:
+
+```csharp
+foreach (var p in StreamStatus.Partitions())
+{
+    if (p.State == StreamPartitionRunState.Stopped && p.StoppedMs > p.UnhealthyStoppedSeconds * 1000)
+    {
+        logger.LogCritical("{Topic}/{Consumer} partition {Partition} stood down ({Reason}) — stopping",
+            p.Topic, p.Consumer, p.Partition, p.StopReason);
+        lifetime.StopApplication();   // graceful: the claim is released, so the replacement starts clean
+    }
+}
+```
+
+Each `StreamPartitionStatus` is a snapshot, not a handle: the monitors stay internal and a reading
+cannot change under you. It carries the identity (`Topic`, `Consumer`, `Partition`), the run state
+and `StopReason`, the backlog (`LagEntries`, `-1` when the sampler has not run; `LagMs`;
+`BlockedMs`; `StoppedMs`), and that consumer's own thresholds, so a caller can apply the configured
+`UnhealthyLagMs` rather than inventing one.
+
+**`LastProcessed` and `IsCaughtUp` are what separate a stalled partition from a busy one.** Compare
+two snapshots: a position that advances is a consumer catching up, and restarting it drops its
+in-flight batches and makes the backlog worse. A position that stands still while `LagEntries` is
+positive is stuck, and that is the only shape a restart fixes. A partition that is `IsCaughtUp` is
+idle at the tail — its position standing still means nothing has arrived, which is not a fault.
+
+Poll it on a timer from a health check or a watchdog, never on a message path: it allocates per
+partition.
+
 ## Metrics worth alerting on
 
 | Metric | Means |
