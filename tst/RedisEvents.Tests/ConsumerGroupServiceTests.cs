@@ -21,7 +21,7 @@ namespace RedisEvents.Tests;
 /// used to be a silent no-op in this mode.
 /// </summary>
 /// <remarks>
-/// Driven at the <see cref="ConsumerGroupFetch"/> seam rather than through hosts, for the reason
+/// Driven at the <see cref="WorkQueueFetch"/> seam rather than through hosts, for the reason
 /// S18b gives: the claim threshold is a constructor argument, and at its 30-second production
 /// default these tests would spend half a minute each proving something they can prove in one.
 /// </remarks>
@@ -260,7 +260,7 @@ public sealed class ConsumerGroupServiceTests(RedisStreamsFixture fixture)
         var publisher = new StreamPublisher(db, topic, new TopicOptions { Partitions = 1 });
         await Publish(publisher, "before");
 
-        await ConsumerGroupFetch.SetGroupPositionAsync(
+        await WorkQueueFetch.SetGroupPositionAsync(
             db,
             key,
             group,
@@ -290,7 +290,7 @@ public sealed class ConsumerGroupServiceTests(RedisStreamsFixture fixture)
             ? parsed
             : throw new InvalidOperationException("Redis returned an unparsable entry id.");
 
-    private ConsumerGroupFetch Member(RedisKey key, string group, string instance, ILogger? log = null) => new(
+    private WorkQueueFetch Member(RedisKey key, string group, string instance, ILogger? log = null) => new(
         fixture.Db,
         key,
         group,

@@ -7,13 +7,15 @@ using StackExchange.Redis;
 namespace RedisEvents.Consumer;
 
 /// <summary>
-/// The <c>UseConsumerGroup = true</c> fetch delegate: <c>XREADGROUP GROUP &lt;consumer&gt;
+/// Implements <see cref="RedisEvents.Config.DeliveryMode.WorkQueue"/>: the <c>XREADGROUP GROUP &lt;consumer&gt;
 /// &lt;instanceId&gt; COUNT n STREAMS &lt;key&gt; &gt;</c>, with an <c>XACK</c> after each batch the
 /// handler completes and <c>XAUTOCLAIM</c> recovery of entries another instance left pending.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This mode is off by default, deliberately.</b> It costs an extra <c>XACK</c> round trip per
+/// <b>This mode is off by default, deliberately — and the reason that matters most is ordering.</b>
+/// Entries of one partition go to whichever member asks first, so two members interleave them and
+/// per-key order is lost, with nothing reassembling it afterwards. Beyond that it costs an extra <c>XACK</c> round trip per
 /// batch and Redis-side pending-entries-list (PEL) bookkeeping per entry, and it gives up the
 /// cheapest thing we have: static partition ownership plus our own coalesced position writes, where
 /// a thousand processed messages cost one <c>HSET</c> per flush interval and Redis tracks nothing
@@ -50,7 +52,7 @@ namespace RedisEvents.Consumer;
 /// (<see cref="IdleDelayMs"/>, the claim cursor) is touched by the reader loop alone.
 /// </para>
 /// </remarks>
-internal sealed class ConsumerGroupFetch
+internal sealed class WorkQueueFetch
 {
     /// <summary>
     /// How long an entry must sit unacknowledged in another consumer's PEL before this instance may
@@ -125,7 +127,7 @@ internal sealed class ConsumerGroupFetch
     /// How often the sweep may run, in milliseconds. Zero (the default) means the idle backoff cap,
     /// so recovery keeps pace with the idle read cadence and stops entirely under load.
     /// </param>
-    internal ConsumerGroupFetch(
+    internal WorkQueueFetch(
         IDatabase db,
         RedisKey key,
         string group,
@@ -679,14 +681,14 @@ internal sealed class ConsumerGroupFetch
 
 
 /// <summary>
-/// The fetched-but-unacknowledged batches of one <see cref="ConsumerGroupFetch"/>, in fetch order,
+/// The fetched-but-unacknowledged batches of one <see cref="WorkQueueFetch"/>, in fetch order,
 /// with the rule that decides which of them one reported position acknowledges.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Why it owns a lock (R-07a).</b> Batches are enqueued by the partition's reader loop, inside
-/// <see cref="ConsumerGroupFetch.FetchAsync"/>, and dequeued by its processor loop, inside
-/// <see cref="ConsumerGroupFetch.AckAsync"/>. With backpressure enabled — the default, and the only
+/// <see cref="WorkQueueFetch.FetchAsync"/>, and dequeued by its processor loop, inside
+/// <see cref="WorkQueueFetch.AckAsync"/>. With backpressure enabled — the default, and the only
 /// shape the channel pipeline has — those are two different threads, whatever the class doc used to
 /// say. A bare <see cref="Queue{T}"/> torn between them loses ids, hands the same ids to two
 /// <c>XACK</c>s, or throws out of the reader loop and kills the partition. The lock is taken once

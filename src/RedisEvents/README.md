@@ -307,6 +307,7 @@ Keys worth knowing, with their defaults:
 | `Consumers[n]:BlockMs` | `1000` | Must stay well under the connection's `syncTimeout` (5000ms default) — validated at startup |
 | `Consumers[n]:StartFrom` | `Stored` | `Stored` with `Persist: None` is a contradiction and is refused at startup |
 | `Consumers[n]:Backpressure:Capacity` | `4` | Batches in flight per partition |
+| `Consumers[n]:Delivery` | `Ordered` | `WorkQueue` gives up per-key ordering — see below |
 
 Misconfiguration throws `StreamConfigurationException` at startup, with the offending key named in
 the message. It never waits until 3am to tell you.
@@ -667,6 +668,37 @@ owns every partition, and every message is processed N times. The ownership arit
 `STREAMS_INSTANCE_COUNT` must track `spec.replicas`. Scale up without it and the new pods own
 nothing; scale down without it and the partitions the departed pods owned are consumed by nobody, in
 silence. Change both together and confirm `streams.partitions.unowned` returns to 0.
+
+### `Delivery = WorkQueue` gives up per-key ordering
+
+**The default, `Ordered`, is the Kafka / EventHub model.** A Kafka or EventHub consumer group is a
+named cursor per partition, and that is exactly what the default path already is: `Consumer` is the
+group id, `p:{topic}:{consumer}` is the per-partition committed cursor, and the ownership registry
+assigns partitions to members. If you came here looking for "consumer groups", you already have them
+and need no key.
+
+`Delivery = WorkQueue` is a different thing: a work queue over `XREADGROUP`. Entries of one
+partition go to whichever member asks first, so two pods interleave them and **per-key order is
+lost**, with nothing reassembling it afterwards.
+
+| | `Ordered` (default) | `WorkQueue` |
+|---|---|---|
+| Reads with | `XREAD` | `XREADGROUP` |
+| Readers per partition | one owner | every member competes |
+| Per-key order | preserved | **lost** |
+| Position cursor | `p:{topic}:{consumer}`, ours | the group's last-delivered id, Redis's |
+| Position reset | `StreamAdmin` rewrites the hash | routes to `XGROUP SETID` |
+| Cost per batch | one coalesced `HSET` per flush interval | an extra `XACK` round trip, plus PEL bookkeeping per entry |
+| Redelivery after a pod dies mid-batch | the partition's new owner re-reads from the last flushed position | a sibling claims the entries out of the PEL (`XAUTOCLAIM`) |
+| Use it for | projections, read models, anything keyed | order-independent commands that may be rejected and retried |
+
+So `WorkQueue` trades ordering for competing-consumer redelivery. Take it only when that trade is
+the one you want — never for a projection, where applying two events to one key out of order
+silently corrupts the read model.
+
+The obsolete `UseConsumerGroup` key still binds for one version: `true` is read as
+`Delivery: WorkQueue` and logs a warning naming the new key. Setting both keys to values that
+disagree is refused at startup.
 
 ### Buffered publishes are lost on a crash
 

@@ -50,7 +50,66 @@ internal static class StreamConfigBinder
         var section = configuration.GetSection(SectionName);
 
         // Source-generated binder (no reflection). A missing section binds to null, which is legal.
-        return section.Get<StreamOptions>() ?? new StreamOptions();
+        var options = section.Get<StreamOptions>() ?? new StreamOptions();
+
+        // Done here rather than in Validate so every path that binds options gets the migration,
+        // including the EventHubs compat shim, and so a caller that never validates still reads the
+        // migrated Delivery rather than a legacy key nothing looks at.
+        MigrateLegacyDeliveryKey(options, logger: null);
+
+        return options;
+    }
+
+    /// <summary>
+    /// Maps the obsolete <c>UseConsumerGroup</c> key onto <see cref="ConsumerOptions.Delivery"/> for
+    /// one version, warning when it is used and refusing when the two keys disagree.
+    /// </summary>
+    /// <remarks>
+    /// Idempotent, and safe to call before a logger exists: the migration itself re-runs to the same
+    /// answer, and the warning is latched so binding and then validating warns exactly once — on the
+    /// call that has a logger. The legacy key keeps its bound value, so the obsolete property still
+    /// reports what was configured.
+    /// </remarks>
+    internal static void MigrateLegacyDeliveryKey(StreamOptions options, ILogger? logger)
+    {
+        for (var i = 0; i < options.Consumers.Length; i++)
+        {
+            var consumer = options.Consumers[i];
+
+#pragma warning disable CS0618 // Reading the obsolete key is this method's entire job.
+            if (consumer?.UseConsumerGroup is not bool legacy)
+                continue;
+#pragma warning restore CS0618
+
+            var key = $"{SectionName}:Consumers[{i}]";
+            var wanted = legacy ? DeliveryMode.WorkQueue : DeliveryMode.Ordered;
+
+            // A silent winner is the worst outcome here: one of the two spellings would be doing
+            // nothing, and which one is not visible anywhere. Refuse instead.
+            if (consumer.DeliveryWasSetExplicitly && consumer.Delivery != wanted)
+            {
+                throw new StreamConfigurationException(
+                    $"{key}:UseConsumerGroup is {(legacy ? "true" : "false")} but {key}:Delivery is {consumer.Delivery}, and they disagree. " +
+                    $"UseConsumerGroup is the obsolete spelling of Delivery — true is {nameof(DeliveryMode.WorkQueue)}, false is " +
+                    $"{nameof(DeliveryMode.Ordered)}. Remove {key}:UseConsumerGroup and keep {key}:Delivery.");
+            }
+
+            consumer.Delivery = wanted;
+
+            if (logger is null || consumer.LegacyDeliveryKeyWarned)
+                continue;
+
+            consumer.LegacyDeliveryKeyWarned = true;
+
+            logger.LogWarning(
+                "Streams: {Key}:UseConsumerGroup is set and is obsolete; it has been read as {Key}:Delivery={Delivery}. " +
+                "Rename the key — UseConsumerGroup is removed in the next version. The old name invited the Kafka/EventHub reading, " +
+                "which is the Ordered default and not this mode: Delivery=WorkQueue reads with XREADGROUP, so entries of one " +
+                "partition go to whichever member asks first and per-key order is lost.",
+                key,
+                key,
+                wanted);
+        }
     }
 
     /// <summary>
@@ -85,6 +144,10 @@ internal static class StreamConfigBinder
         var isDevelopment = string.Equals(environment, DevelopmentEnvironmentName, StringComparison.OrdinalIgnoreCase);
 
         ValidateTopics(options, isDevelopment, environment);
+        // Bind already migrated it silently; this is the call that actually warns, because this is
+        // the one with a logger. Options built in code rather than bound get their migration here.
+        MigrateLegacyDeliveryKey(options, logger);
+
         ValidateConsumers(options, syncTimeoutMs, logger);
         ValidateProducers(options, logger);
     }

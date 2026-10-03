@@ -14,7 +14,7 @@ namespace RedisEvents.UnitTests;
 /// <remarks>
 /// <para>
 /// These drive <see cref="PendingAcks"/> directly rather than through
-/// <see cref="ConsumerGroupFetch"/>, because both defects live in the bookkeeping and not in the
+/// <see cref="WorkQueueFetch"/>, because both defects live in the bookkeeping and not in the
 /// transport: the fetch would need an <see cref="IDatabase"/> to build, and the interesting cases
 /// (a claimed batch queued behind a live one; a reader and a processor racing) are about the queue
 /// alone. The end-to-end proof against a real group is in the service tests.

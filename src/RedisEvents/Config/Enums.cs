@@ -167,6 +167,38 @@ public enum InstanceMode
 }
 
 /// <summary>
+/// Defines how entries of one partition are handed to the members of a consumer.
+/// </summary>
+/// <remarks>
+/// Parallel to <see cref="InstanceMode"/>: that one decides <em>which</em> member reads a partition,
+/// this one decides whether a partition has a single reader at all.
+/// </remarks>
+public enum DeliveryMode
+{
+    /// <summary>
+    /// Ordered (default) — one owner per partition, entries in stream order.
+    /// </summary>
+    /// <remarks>
+    /// This is the Kafka / EventHub named-cursor model, and it is what this library does by default:
+    /// <see cref="ConsumerOptions.Consumer"/> is the group id, <c>p:{topic}:{consumer}</c> is the
+    /// per-partition committed cursor, and the ownership registry assigns partitions to members.
+    /// Fan-out stays available to the partition owner through <c>IBatchHandler&lt;T&gt;</c> and
+    /// <see cref="ConsumerOptions.BatchSize"/>, with order intact at the partition boundary.
+    /// </remarks>
+    Ordered = 0,
+
+    /// <summary>
+    /// WorkQueue — competing consumers via <c>XREADGROUP</c>. Entries go to whichever member asks
+    /// first, so <b>per-key order is lost</b>.
+    /// </summary>
+    /// <remarks>
+    /// For order-independent commands that may be rejected and retried, never for projections. See
+    /// <see cref="ConsumerOptions.Delivery"/> for the full trade-off.
+    /// </remarks>
+    WorkQueue = 1,
+}
+
+/// <summary>
 /// Defines the trim mode for stream length management.
 /// </summary>
 public enum TrimMode

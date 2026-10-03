@@ -21,7 +21,11 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   and the broker are the same Redis instance.
 - **You get Kafka-shaped guarantees where they matter** — partitioned topics, per-key ordering,
   consumer groups with durable positions, replay from a point in time — without Kafka's operational
-  weight.
+  weight. The default delivery mode *is* the Kafka/EventHub model: a named cursor per partition
+  (`Consumer` is the group id, `p:{topic}:{consumer}` the committed offset), one owner per partition,
+  entries in stream order. `Delivery = WorkQueue` opts into an `XREADGROUP` work queue instead,
+  trading per-key ordering for competing-consumer redelivery — right for order-independent commands,
+  wrong for projections.
 - **Positions stored in the DB by default** - so will return to current  state automatically on failure.
 - **It's fast, and the numbers below are measured, not marketed.** Publishing pipelines over
   `StackExchange.Redis`, batches and buffers rather than round-tripping per message, and the wire

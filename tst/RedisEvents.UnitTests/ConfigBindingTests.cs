@@ -522,6 +522,121 @@ public class ConfigBindingTests
         await act.Should().NotThrowAsync();
     }
 
+    // ---------------------------------------------------------------- Delivery / UseConsumerGroup
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Delivery_DefaultsToOrdered()
+    {
+        new ConsumerOptions().Delivery.Should().Be(
+            DeliveryMode.Ordered,
+            "the ordered named-cursor model is the default; WorkQueue loses per-key order and must be asked for");
+
+        var options = StreamConfigBinder.Bind(FromJson("""
+        { "Streams": { "Consumers": [ { "Topic": "orders" } ] } }
+        """));
+
+        options.Consumers[0].Delivery.Should().Be(DeliveryMode.Ordered);
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Bind_Delivery_BindsWorkQueue()
+    {
+        var options = StreamConfigBinder.Bind(FromJson("""
+        { "Streams": { "Consumers": [ { "Topic": "orders", "Delivery": "WorkQueue" } ] } }
+        """));
+
+        options.Consumers[0].Delivery.Should().Be(DeliveryMode.WorkQueue);
+    }
+
+    /// <summary>
+    /// The obsolete key keeps binding for one version, so an existing appsettings keeps working —
+    /// but it says so in the log, naming the new key.
+    /// </summary>
+    [Theory]
+    [InlineData(true, DeliveryMode.WorkQueue)]
+    [InlineData(false, DeliveryMode.Ordered)]
+    [Trait("TestType", "UnitTest")]
+    public void Validate_LegacyUseConsumerGroup_MapsOntoDeliveryAndWarns(bool legacy, DeliveryMode expected)
+    {
+        var options = StreamConfigBinder.Bind(FromJson($$"""
+        { "Streams": { "Consumers": [ { "Topic": "orders", "UseConsumerGroup": {{(legacy ? "true" : "false")}} } ] } }
+        """));
+
+        options.Consumers[0].Delivery.Should().Be(expected, "the migration runs in Bind too, for callers that never validate");
+
+        var log = new CapturingLogger();
+        StreamConfigBinder.Validate(options, Production, 5000, log);
+
+        var warning = log.Lines.Should().ContainSingle(l =>
+            l.Level == LogLevel.Warning && l.Message.Contains("UseConsumerGroup", StringComparison.Ordinal)).Subject;
+
+        warning.Message.Should().Contain("obsolete");
+        warning.Message.Should().Contain("Streams:Consumers[0]:Delivery", "the warning has to name the new key");
+        warning.Message.Should().Contain(expected.ToString());
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Validate_LegacyUseConsumerGroup_WarnsOnceAcrossBindAndValidate()
+    {
+        var options = StreamConfigBinder.Bind(FromJson("""
+        { "Streams": { "Consumers": [ { "Topic": "orders", "UseConsumerGroup": true } ] } }
+        """));
+
+        var log = new CapturingLogger();
+        StreamConfigBinder.Validate(options, Production, 5000, log);
+        StreamConfigBinder.Validate(options, Production, 5000, log);
+
+        log.Lines.Count(l => l.Message.Contains("UseConsumerGroup", StringComparison.Ordinal))
+            .Should().Be(1, "the warning is latched; repeating it on every validate would train operators to ignore it");
+    }
+
+    /// <summary>
+    /// Both spellings, disagreeing. A silent winner would leave one of the two keys doing nothing
+    /// with no way to see which, so this is refused.
+    /// </summary>
+    [Theory]
+    [InlineData("true", "Ordered")]
+    [InlineData("false", "WorkQueue")]
+    [Trait("TestType", "UnitTest")]
+    public void Bind_BothDeliveryKeys_Disagreeing_IsRefused(string legacy, string delivery)
+    {
+        var configuration = FromJson($$"""
+        {
+          "Streams": {
+            "Consumers": [ { "Topic": "orders", "UseConsumerGroup": {{legacy}}, "Delivery": "{{delivery}}" } ]
+          }
+        }
+        """);
+
+        var message = Assert.Throws<StreamConfigurationException>(() => StreamConfigBinder.Bind(configuration)).Message;
+
+        message.Should().Contain("Streams:Consumers[0]:UseConsumerGroup");
+        message.Should().Contain("Streams:Consumers[0]:Delivery");
+        message.Should().Contain("disagree");
+    }
+
+    [Theory]
+    [InlineData("true", "WorkQueue")]
+    [InlineData("false", "Ordered")]
+    [Trait("TestType", "UnitTest")]
+    public void Bind_BothDeliveryKeys_Agreeing_IsAccepted(string legacy, string delivery)
+    {
+        var configuration = FromJson($$"""
+        {
+          "Streams": {
+            "Consumers": [ { "Topic": "orders", "UseConsumerGroup": {{legacy}}, "Delivery": "{{delivery}}" } ]
+          }
+        }
+        """);
+
+        var act = () => StreamConfigBinder.Bind(configuration);
+
+        act.Should().NotThrow("saying the same thing twice is redundant, not contradictory");
+    }
+
     /// <summary>Records what an operator would have seen in the log.</summary>
     private sealed class CapturingLogger : ILogger
     {
