@@ -6,6 +6,32 @@ actually changed.
 
 ## 2026-10-04
 
+### Changed — breaking (config)
+
+- **`ConsumerOptions.UseConsumerGroup` is replaced by `ConsumerOptions.Delivery`, a
+  `DeliveryMode` of `Ordered` (default) or `WorkQueue`.** `UseConsumerGroup = true` is
+  `Delivery = DeliveryMode.WorkQueue`.
+  - **The old name was misleading, which is the point of the rename.** It invited the Kafka /
+    EventHub reading, and a Kafka consumer group is a *named cursor per partition* — which is what
+    this library's **default** path already is: `Consumer` is the group id,
+    `p:{topic}:{consumer}` is the per-partition committed cursor, and the ownership registry assigns
+    partitions to members. `XREADGROUP` is something else: a work queue, where entries of one
+    partition go to whichever member asks first, so **per-key order is lost**. People were reaching
+    for the flag to get ordered named cursors they already had, and getting an unordered work queue
+    instead. Its legitimate niche is order-independent commands that may be rejected and retried; it
+    is wrong for projections.
+  - The whole trade-off now lives on the public `Delivery` member's own documentation — the ordering
+    loss, the extra `XACK` round trip per batch and per-entry PEL bookkeeping, and that the position
+    store is bypassed because Redis owns the cursor (so `StreamAdmin`'s reset family routes to
+    `XGROUP SETID`). It was only ever on the internal `ConsumerGroupFetch` class, which nobody
+    consuming the package would open. That class is now `WorkQueueFetch`.
+  - **`Streams:Consumers:<n>:UseConsumerGroup` keeps binding for one version.** `true` maps to
+    `Delivery = WorkQueue`, `false` to `Ordered`, and either logs a warning naming the new key. The
+    property is `[Obsolete]` and is removed in the next version.
+  - **Both keys set and disagreeing is refused** with a `StreamConfigurationException` — a silent
+    winner would leave one of the two spellings doing nothing with no way to see which. Set to the
+    same meaning, they are accepted.
+
 ### Changed — breaking (behaviour)
 
 - **Partition ownership now defaults to `InstanceMode.Lease` instead of `InstanceMode.Static`.** The

@@ -254,7 +254,7 @@ public class CompatShimTests
           },
           "Streams": {
             "Consumers": [
-              { "Topic": "transactions", "Consumer": "plat-alerts", "BatchSize": 250, "UseConsumerGroup": true, "OnError": "StopPartition" }
+              { "Topic": "transactions", "Consumer": "plat-alerts", "BatchSize": 250, "Delivery": "WorkQueue", "OnError": "StopPartition" }
             ]
           }
         }
@@ -264,7 +264,7 @@ public class CompatShimTests
         overridden.Topic.Should().Be("transactions");
         overridden.BatchSize.Should().Be(250);
         overridden.Consumer.Should().Be("plat-alerts");
-        overridden.UseConsumerGroup.Should().BeTrue();
+        overridden.Delivery.Should().Be(DeliveryMode.WorkQueue);
         overridden.OnError.Should().Be(ErrorPolicy.StopPartition);
 
         var untouched = EventHubsCompatConfig.ResolveByIndex(configuration, 0);

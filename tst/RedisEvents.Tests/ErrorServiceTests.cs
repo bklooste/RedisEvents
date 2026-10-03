@@ -420,7 +420,7 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
     // ------------------------------------------------------------------ S18
 
     /// <summary>
-    /// S18a — <c>UseConsumerGroup = true</c>: two instances of one consumer split the load, and
+    /// S18a — <c>Delivery = WorkQueue</c>: two instances of one consumer split the load, and
     /// between them see every message exactly once.
     /// </summary>
     [Fact]
@@ -461,12 +461,12 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
         {
             Topic = topic,
             BatchSize = 1,
-            UseConsumerGroup = true,
+            Delivery = DeliveryMode.WorkQueue,
             Backpressure = new BackpressureOptions { Capacity = 1 },
 
-            // Static, explicitly: this scenario needs both instances reading the one partition so
-            // the consumer group can split the load between them. Under the Lease default exactly
-            // one of them would claim partition 0 and the other would read nothing.
+            // Static, explicitly: WorkQueue delivery needs both instances reading the one
+            // partition so the competing consumers can split the load between them. Under the Lease
+            // default exactly one would claim partition 0 and the other would read nothing.
             Instances = new InstanceOptions { Mode = InstanceMode.Static },
         };
 
@@ -521,7 +521,7 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
     /// mid-batch, which is the only reason to pay for consumer-group mode in the first place.
     /// </summary>
     /// <remarks>
-    /// Driven at the <see cref="ConsumerGroupFetch"/> seam rather than through two hosts, because
+    /// Driven at the <see cref="WorkQueueFetch"/> seam rather than through two hosts, because
     /// the claim threshold is a constructor argument: at its 30-second production default this test
     /// would have to sit out half a minute to prove a rule it can prove in a second.
     /// </remarks>
@@ -538,7 +538,7 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
 
         const int claimMinIdleMs = 300;
 
-        ConsumerGroupFetch Member(string instance) => new(
+        WorkQueueFetch Member(string instance) => new(
             db,
             key,
             group,

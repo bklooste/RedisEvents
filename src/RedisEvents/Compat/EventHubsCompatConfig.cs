@@ -29,7 +29,7 @@ namespace RedisEvents.Compat;
 /// </para>
 /// <para>
 /// <b>A <c>Streams:Consumers</c> entry for the same topic wins outright.</b> A shim consumer is
-/// still a real streams consumer, and half of the migration checklist — <c>UseConsumerGroup</c> for
+/// still a real streams consumer, and half of the migration checklist — <c>Delivery</c> for
 /// a service that relied on Kafka rebalancing, <c>Persist</c>, <c>OnError</c>, <c>ReadMode</c> —
 /// lives on keys the <c>EventHubs:</c> section cannot express. Adding a <c>Streams:Consumers</c>
 /// entry naming the topic replaces the mapped entry wholesale (not key by key), which is the same

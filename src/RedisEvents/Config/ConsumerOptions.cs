@@ -128,9 +128,72 @@ public sealed record ConsumerOptions
     public int ContestedRecheckSeconds { get; set; } = 30;
 
     /// <summary>
-    /// Whether to use Redis consumer groups (default: false).
+    /// How entries of one partition are handed to the members of this consumer (default:
+    /// <see cref="DeliveryMode.Ordered"/>).
     /// </summary>
-    public bool UseConsumerGroup { get; set; }
+    /// <remarks>
+    /// <para>
+    /// <b><see cref="DeliveryMode.WorkQueue"/> loses per-key order, and that is the first thing to
+    /// know about it.</b> It reads with <c>XREADGROUP</c>, so entries of one partition go to
+    /// whichever member asks first and two members interleave them. Nothing reassembles that order
+    /// afterwards. Its legitimate niche is order-independent commands or verbs that may be rejected
+    /// and retried; it is the wrong mode for a projection, where applying two events to one key out
+    /// of order silently corrupts the read model.
+    /// </para>
+    /// <para>
+    /// <b>It also costs more.</b> An extra <c>XACK</c> round trip per batch, and Redis-side
+    /// pending-entries-list (PEL) bookkeeping per entry — against the default path, where a thousand
+    /// processed messages cost one <c>HSET</c> per flush interval and Redis tracks nothing per
+    /// consumer at all.
+    /// </para>
+    /// <para>
+    /// <b>The position store is bypassed entirely.</b> In this mode Redis owns the read cursor (the
+    /// group's last-delivered id) and the PEL, so there is no <c>p:{topic}:{consumer}</c> hash to
+    /// write, no flusher tick, and no start-position resolution after the first run. A position
+    /// reset therefore cannot move this consumer by rewriting that hash, so <c>StreamAdmin</c>'s
+    /// reset family routes to <c>XGROUP SETID</c> instead.
+    /// </para>
+    /// <para>
+    /// <b>The ordered, named-cursor semantics people expect from a Kafka or EventHub consumer group
+    /// are the default — <see cref="DeliveryMode.Ordered"/> — not this.</b> There,
+    /// <see cref="Consumer"/> is the group id, <c>p:{topic}:{consumer}</c> is the per-partition
+    /// committed cursor, and the ownership registry assigns partitions to members. Reach for
+    /// <see cref="DeliveryMode.WorkQueue"/> only when competing consumers with claim and recovery
+    /// semantics are genuinely wanted, and not merely because Redis offers them.
+    /// </para>
+    /// </remarks>
+    public DeliveryMode Delivery
+    {
+        get => this.delivery;
+        set
+        {
+            this.delivery = value;
+            this.DeliveryWasSetExplicitly = true;
+        }
+    }
+
+    /// <summary>
+    /// True when <see cref="Delivery"/> was assigned rather than left at its default. Used to tell
+    /// a config that asked for <see cref="DeliveryMode.Ordered"/> apart from one that said nothing,
+    /// so the legacy <c>UseConsumerGroup</c> key can be refused when the two disagree.
+    /// </summary>
+    internal bool DeliveryWasSetExplicitly { get; private set; }
+
+    private DeliveryMode delivery = DeliveryMode.Ordered;
+
+    /// <summary>
+    /// Latches the obsolete-key warning so binding and then validating reports it once.
+    /// </summary>
+    internal bool LegacyDeliveryKeyWarned { get; set; }
+
+    /// <summary>
+    /// Obsolete spelling of <see cref="Delivery"/>, honoured for one version so an existing
+    /// <c>Streams:Consumers:&lt;n&gt;:UseConsumerGroup</c> keeps binding. <c>true</c> maps to
+    /// <see cref="DeliveryMode.WorkQueue"/> and logs a warning naming the new key; setting both this
+    /// and <see cref="Delivery"/> to values that disagree is refused rather than silently resolved.
+    /// </summary>
+    [Obsolete("Use Delivery instead: UseConsumerGroup = true is Delivery = DeliveryMode.WorkQueue. The old name invited the Kafka/EventHub reading, which is the Ordered default, not this mode.")]
+    public bool? UseConsumerGroup { get; set; }
 
     /// <summary>
     /// Instance configuration for partition ownership; null = single instance.

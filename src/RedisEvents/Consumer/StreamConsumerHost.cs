@@ -128,7 +128,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// Overrides the position store this host uses instead of the default <see cref="RedisPositionStore"/>
     /// — <see cref="Testing.MemoryPositionStore"/> in tests, or any other <see cref="IPositionStore"/>.
     /// Only consulted when <see cref="ConsumerOptions.Persist"/> is not <see cref="PersistMode.None"/>
-    /// and <see cref="ConsumerOptions.UseConsumerGroup"/> is <see langword="false"/> — the cases where
+    /// and <see cref="ConsumerOptions.Delivery"/> is <see cref="DeliveryMode.Ordered"/> — the cases where
     /// a position store is used at all.
     /// </param>
     /// <exception cref="StreamConfigurationException">The consumer names no topic.</exception>
@@ -345,7 +345,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // The line an operator greps for: the whole map, not just this instance's share of it.
         this.log.LogInformation(
             "Streams: consumer {Consumer} on topic {Topic} — {Ownership}; readMode={ReadMode} persist={Persist} " +
-            "batchSize={BatchSize} backpressure={Backpressure} group={UseConsumerGroup} task={Task}.",
+            "batchSize={BatchSize} backpressure={Backpressure} delivery={Delivery} task={Task}.",
             this.consumerName,
             topic,
             leased
@@ -359,7 +359,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             this.consumer.Backpressure.Enabled
                 ? string.Create(CultureInfo.InvariantCulture, $"on(capacity={this.consumer.Backpressure.Capacity})")
                 : "off(inline)",
-            this.consumer.UseConsumerGroup,
+            this.consumer.Delivery,
             StreamNames.ConsumerHostTaskName(this.consumerName));
 
         // The linked source every worker hangs off; StopAsync cancels it.
@@ -450,7 +450,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // the reader connection all outlive it.
         this.workerCts = CancellationTokenSource.CreateLinkedTokenSource(this.cts!.Token);
 
-        var useGroup = this.consumer.UseConsumerGroup;
+        var useGroup = this.consumer.Delivery == DeliveryMode.WorkQueue;
 
         // Group mode: Redis owns the read cursor through the PEL, so the position hash is bypassed
         // entirely and an XACK per successful batch takes its place.
@@ -513,7 +513,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             if (useGroup)
             {
                 this.log.LogInformation(
-                    "Streams: consumer {Consumer} on topic {Topic} has ReadMode=Block and UseConsumerGroup=true; group reads " +
+                    "Streams: consumer {Consumer} on topic {Topic} has ReadMode=Block and Delivery=WorkQueue; work-queue reads " +
                     "run on the shared multiplexer with the idle backoff, so no dedicated reader connection is opened.",
                     this.consumerName,
                     topic);
@@ -1349,7 +1349,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         if (useGroup)
         {
-            var group = new ConsumerGroupFetch(
+            var group = new WorkQueueFetch(
                 db,
                 key,
                 this.consumerName,
@@ -2070,7 +2070,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// nothing here needs synchronisation.
     /// </summary>
     /// <param name="fetch">The group fetch whose pending entries are acknowledged.</param>
-    private sealed class GroupAcknowledger(ConsumerGroupFetch fetch)
+    private sealed class GroupAcknowledger(WorkQueueFetch fetch)
     {
         private StreamId last;
 
