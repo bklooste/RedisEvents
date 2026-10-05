@@ -34,10 +34,16 @@ internal readonly record struct StreamSpanContext(string Topic, int Partition, s
 /// traces in inline (no-backpressure) mode where the hop never happened.
 /// </para>
 /// <para>
-/// <b>Link versus parent.</b> A multi-message batch <em>links</em> to the producers' contexts: one
-/// batch legitimately carries many trace contexts and electing one of them as the parent would
-/// misattribute every other message in it. A single-message batch — <c>IMessageHandler</c> with
-/// batch size 1 — <em>parents</em> off the producer instead, so the trace stays continuous.
+/// <b>Link versus parent.</b> A batch <em>parents</em> off the producer whenever it can do so without
+/// lying, and <em>links</em> only when it cannot. A single-message batch — <c>IMessageHandler</c> with
+/// batch size 1 — parents off its one producer. A multi-message batch whose entries all carry the
+/// <em>same</em> trace id also parents off it: that is the shape a request-driven flow has, and
+/// forking a new root there would split one logical operation into a trace per hop while recording
+/// the relationship only as a backward link. Only a batch that genuinely mixes traces — the shape a
+/// high-volume feed has — links to its producers and adopts none of them, because electing one
+/// parent out of many would misattribute every other message in the batch.
+/// <see cref="SharesOneTrace"/> is the predicate that separates the two, and it scans the whole
+/// batch so a late disagreement cannot be missed.
 /// </para>
 /// <para>
 /// <b>Cost when tracing is off.</b> Every entry point starts from
@@ -88,6 +94,27 @@ internal static class StreamActivity
             if (TryParseTraceParent(batch[0].TraceParent, out var single))
             {
                 parent = single;
+            }
+        }
+        else if (SharesOneTrace(batch, out var firstIndex)
+            && TryParseTraceParent(batch[firstIndex].TraceParent, out var shared))
+        {
+            // One trace, many entries: parent off it, so a request-driven flow stays one trace
+            // across the hop instead of forking a root per batch. Links still name the other
+            // producer spans within that trace, so no causality is lost by picking a parent.
+            parent = shared;
+
+            var limit = batch.Length < MaxTraceLinks ? batch.Length : MaxTraceLinks;
+
+            for (var i = 0; i < limit; i++)
+            {
+                if (i != firstIndex
+                    && TryParseTraceParent(batch[i].TraceParent, out var sibling)
+                    && sibling.SpanId != shared.SpanId)
+                {
+                    links ??= new List<ActivityLink>(limit);
+                    links.Add(new ActivityLink(sibling));
+                }
             }
         }
         else
@@ -157,6 +184,77 @@ internal static class StreamActivity
         return string.IsNullOrEmpty(correlationId)
             ? null
             : log.BeginScope(new CorrelationScope(correlationId));
+    }
+
+    /// <summary>
+    /// Offset of the 32-hex trace id within a W3C <c>traceparent</c> — <c>00-&lt;trace&gt;-&lt;span&gt;-&lt;flags&gt;</c>.
+    /// </summary>
+    private const int TraceIdOffset = 3;
+
+    /// <summary>Length of the hex trace id within a <c>traceparent</c>.</summary>
+    private const int TraceIdLength = 32;
+
+    /// <summary>
+    /// Whether every entry in the batch that carries a <c>traceparent</c> carries the <em>same</em>
+    /// trace id, which is what makes it safe to parent the consumer span off one of them.
+    /// </summary>
+    /// <param name="batch">The batch, already sliced to its real length.</param>
+    /// <param name="firstIndex">Index of the first entry carrying a usable <c>traceparent</c>.</param>
+    /// <returns>
+    /// <see langword="true"/> when at least one entry carries a trace id and no entry carries a
+    /// different one. <see langword="false"/> when the batch mixes traces, or carries none at all —
+    /// both of which leave the caller on the links path.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// This compares the trace id as a <em>character span</em> rather than parsing each entry into an
+    /// <see cref="ActivityContext"/>. A batch is read with <c>BatchSize</c> up to the hundreds, and
+    /// the comparison is the hot path's only per-entry cost here; the single successful parse happens
+    /// once, in the caller, on <paramref name="firstIndex"/>.
+    /// </para>
+    /// <para>
+    /// The whole batch is scanned, not just the first <see cref="MaxTraceLinks"/> entries. Stopping at
+    /// the cap would let a batch whose first entries agree but whose later ones do not be parented off
+    /// a trace that does not own it — the one case this predicate exists to exclude.
+    /// </para>
+    /// </remarks>
+    private static bool SharesOneTrace(ReadOnlySpan<StreamMsg> batch, out int firstIndex)
+    {
+        firstIndex = -1;
+
+        for (var i = 0; i < batch.Length; i++)
+        {
+            var traceParent = batch[i].TraceParent;
+
+            if (string.IsNullOrEmpty(traceParent))
+            {
+                // No opinion: an entry the producer stamped nothing on cannot contradict the others.
+                continue;
+            }
+
+            if (traceParent.Length < TraceIdOffset + TraceIdLength)
+            {
+                // Malformed. Treat it as a disagreement rather than ignoring it: the entry may well
+                // belong to another trace, and guessing in favour of a parent is the unsafe guess.
+                return false;
+            }
+
+            if (firstIndex < 0)
+            {
+                firstIndex = i;
+                continue;
+            }
+
+            var candidate = traceParent.AsSpan(TraceIdOffset, TraceIdLength);
+            var incumbent = batch[firstIndex].TraceParent!.AsSpan(TraceIdOffset, TraceIdLength);
+
+            if (!candidate.Equals(incumbent, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return firstIndex >= 0;
     }
 
     /// <summary>
