@@ -74,6 +74,12 @@ public enum StreamHealthRule
 
     /// <summary>Degraded: the ownership registry shows a gap or an overlap.</summary>
     OwnershipDegraded = 11,
+
+    /// <summary>
+    /// Degraded: a consumer is caught up on every partition this instance reads for it and none of
+    /// them has moved past <c>DegradedSilenceSeconds</c>.
+    /// </summary>
+    Silent = 12,
 }
 
 /// <summary>One partition's own grade, before the process-wide rules are applied.</summary>
@@ -144,6 +150,14 @@ public sealed class StreamHealthReport
     public StreamPartitionStatus? Partition { get; }
 }
 
+/// <summary>A consumer that is caught up on every partition this instance reads for it and is receiving nothing.</summary>
+/// <param name="Topic">Stream topic.</param>
+/// <param name="Consumer">Consumer name.</param>
+/// <param name="Partitions">How many of its partitions this instance is reading, all of them silent.</param>
+/// <param name="SilentMs">The shortest time any of those partitions has gone without a change of position.</param>
+/// <param name="DegradedSilenceSeconds">The consumer's <c>ConsumerOptions.DegradedSilenceSeconds</c>.</param>
+public readonly record struct StreamSilentConsumer(string Topic, string Consumer, int Partitions, double SilentMs, int DegradedSilenceSeconds);
+
 /// <summary>
 /// The one implementation of the stream health rules: it grades a <see cref="StreamStatus"/> snapshot
 /// into Healthy, Degraded or Unhealthy.
@@ -171,9 +185,18 @@ public sealed class StreamHealthReport
 /// <item>
 ///   <term>Degraded</term>
 ///   <description>Nothing has started reading yet; a partition blocked, stopped, or lagging past
-///   <c>UnhealthyLagMs</c>; an ownership gap or overlap.</description>
+///   <c>UnhealthyLagMs</c>; an ownership gap or overlap; a consumer caught up and receiving nothing
+///   past <c>DegradedSilenceSeconds</c> (off by default).</description>
 /// </item>
 /// </list>
+/// <para>
+/// <b>A frozen position has one clock and two meanings.</b> Either the tail is ahead of it, so an
+/// entry is waiting and the consumer is at fault (behind-and-frozen, below), or the tail is not, so
+/// there is nothing to read (<see cref="FindSilent"/>). The first is Unhealthy because a restart
+/// hands the partition to something that will read it. The second is Degraded and cannot be made
+/// Unhealthy: the consumer is working, a restart changes nothing upstream, and failing the pod on
+/// silence is a restart loop for as long as the topic is quiet.
+/// </para>
 /// <para>
 /// <b>Lag is Degraded, never Unhealthy.</b> Restarting a consumer whose only problem is that it is
 /// behind drops its in-flight batches and makes the backlog worse, on a loop. <c>UnhealthyLagMs</c>
@@ -344,6 +367,23 @@ public static class StreamHealth
                 rule == StreamHealthRule.Lagging ? tally.Lagging : null);
         }
 
+        // Last, so it never hides a rule that names a fault: everything above is about a consumer
+        // that is not reading; this one is about a consumer that is, and has nothing to read.
+        if (FindSilent(partitions) is { } silent)
+        {
+            data["silentConsumer"] = string.Concat(silent.Topic, "/", silent.Consumer);
+            data["silentMs"] = (long)silent.SilentMs;
+
+            return new StreamHealthReport(
+                StreamHealthStatus.Degraded,
+                StreamHealthRule.Silent,
+                $"Streams: consumer {silent.Consumer} on {silent.Topic} is caught up and receiving nothing: none of the {silent.Partitions} " +
+                $"partition(s) it reads here has moved for {Seconds(silent.SilentMs)}s, past its DegradedSilenceSeconds of " +
+                $"{silent.DegradedSilenceSeconds}. A quiet topic and a broken upstream look the same from here; a restart fixes neither.",
+                data,
+                partition: null);
+        }
+
         return new StreamHealthReport(
             StreamHealthStatus.Healthy,
             StreamHealthRule.None,
@@ -397,6 +437,86 @@ public static class StreamHealth
             ? new(StreamHealthStatus.Degraded, StreamHealthRule.Lagging)
             : new(StreamHealthStatus.Healthy, StreamHealthRule.None);
     }
+
+    /// <summary>
+    /// The consumer that has been silent longest, or <see langword="null"/>: one whose
+    /// <c>DegradedSilenceSeconds</c> is set, and whose every running partition in the snapshot is at
+    /// the tail of its stream with a position unchanged for that long.
+    /// </summary>
+    /// <remarks>
+    /// Judged per consumer and only over <see cref="StreamPartitionRunState.Running"/> partitions:
+    /// one that is starting, blocked or stopped answers to its own rule. A partition counts as
+    /// silent only on a fresh tail sample that is not ahead of its position, so a tail that was
+    /// never sampled or has gone stale is unknown, and unknown is not silent. The clock is
+    /// <see cref="StreamPartitionStatus.PositionUnchangedMs"/>, which starts when this instance
+    /// began reading the partition, so a consumer that has just started, or just acquired a lease,
+    /// gets one whole window first. Partitions another instance reads are not in the snapshot.
+    /// </remarks>
+    /// <param name="partitions">The snapshot, normally <see cref="StreamStatus.Partitions"/>.</param>
+    /// <returns>The silent consumer, or <see langword="null"/> when there is none.</returns>
+    public static StreamSilentConsumer? FindSilent(IReadOnlyList<StreamPartitionStatus> partitions)
+    {
+        ArgumentNullException.ThrowIfNull(partitions);
+
+        StreamSilentConsumer? worst = null;
+        var staleAfterMs = StreamLag.TailStaleAfter.TotalMilliseconds;
+
+        for (var i = 0; i < partitions.Count; i++)
+        {
+            var first = partitions[i];
+
+            if (first.DegradedSilenceSeconds <= 0 || first.State != StreamPartitionRunState.Running)
+            {
+                continue;
+            }
+
+            // Grade a consumer once, at its first running partition in the snapshot.
+            var seen = false;
+            for (var k = 0; k < i && !seen; k++)
+            {
+                seen = partitions[k].State == StreamPartitionRunState.Running && SameConsumer(partitions[k], first);
+            }
+
+            if (seen)
+            {
+                continue;
+            }
+
+            var windowMs = first.DegradedSilenceSeconds * 1000d;
+            var owned = 0;
+            var shortest = double.MaxValue;
+            var allSilent = true;
+
+            for (var j = i; j < partitions.Count && allSilent; j++)
+            {
+                var p = partitions[j];
+
+                if (p.State != StreamPartitionRunState.Running || !SameConsumer(p, first))
+                {
+                    continue;
+                }
+
+                owned++;
+                allSilent = !p.IsBehindTail
+                    && p.TailId is not null
+                    && p.TailSampleAgeMs >= 0
+                    && p.TailSampleAgeMs <= staleAfterMs
+                    && p.PositionUnchangedMs >= windowMs;
+                shortest = Math.Min(shortest, p.PositionUnchangedMs);
+            }
+
+            if (allSilent && (worst is null || shortest > worst.Value.SilentMs))
+            {
+                worst = new StreamSilentConsumer(first.Topic, first.Consumer, owned, shortest, first.DegradedSilenceSeconds);
+            }
+        }
+
+        return worst;
+    }
+
+    private static bool SameConsumer(StreamPartitionStatus a, StreamPartitionStatus b)
+        => string.Equals(a.Topic, b.Topic, StringComparison.Ordinal)
+        && string.Equals(a.Consumer, b.Consumer, StringComparison.Ordinal);
 
     /// <summary>
     /// Takes the snapshot and the process-level facts and grades them. The seam

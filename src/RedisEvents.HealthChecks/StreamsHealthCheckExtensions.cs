@@ -3,19 +3,18 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using RedisEvents.Extensions;
 
-namespace RedisEvents.Web;
+namespace RedisEvents.HealthChecks;
 
 /// <summary>
 /// Registration for <see cref="StreamsHealthCheck"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// This is the hook that used to be the <c>TODO(P1/P3)</c> in
-/// <c>RedisEvents.Extensions.StreamsBuilderExtensions.Core</c>. It lives here, and not in the
-/// core library, because <see cref="IHealthCheck"/> comes from
-/// <c>Microsoft.Extensions.Diagnostics.HealthChecks</c>, which core deliberately does not reference
-/// after the R-25 headless split — a worker with no web host must be able to reference
-/// <c>RedisEvents</c> alone.
+/// It lives in <c>RedisEvents.HealthChecks</c>, and not in the core library, because
+/// <see cref="IHealthCheck"/> comes from <c>Microsoft.Extensions.Diagnostics.HealthChecks</c>, which
+/// core deliberately does not reference. That package has no ASP.NET Core dependency, so a Generic
+/// Host worker and a web service register the same check; a worker acts on it through an
+/// <c>IHealthCheckPublisher</c>, a web service maps it to an endpoint.
 /// </para>
 /// <para>
 /// Registration is therefore explicit: a service that wants the readiness answer calls
@@ -24,7 +23,7 @@ namespace RedisEvents.Web;
 /// </remarks>
 public static class StreamsHealthCheckExtensions
 {
-    private const string RegisteredKey = "RedisEvents.Web:HealthCheck";
+    private const string RegisteredKey = "RedisEvents.HealthChecks:HealthCheck";
 
     /// <summary>
     /// Registers <see cref="StreamsHealthCheck"/> under the name and tag <c>streams</c>.

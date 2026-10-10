@@ -9,6 +9,7 @@ using RedisEvents.Config;
 using RedisEvents.Diagnostics;
 using RedisEvents.Ownership;
 using RedisEvents.Wire;
+using RedisEvents.HealthChecks;
 using RedisEvents.Web;
 
 using StackExchange.Redis;

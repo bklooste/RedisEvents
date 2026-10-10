@@ -278,7 +278,8 @@ topic's streams they effectively are one.
 ```
 src/
   RedisEvents/               core library — producers, consumers, positions, outbox, admin, wire format
-  RedisEvents.Web/           ASP.NET Core health check + admin minimal-API endpoints
+  RedisEvents.HealthChecks/  Host-neutral stream health check (no ASP.NET Core)
+  RedisEvents.Web/           ASP.NET Core admin minimal-API endpoints
   RedisEvents.MessagePack/   MessagePack-typed publish/consume, with size-gated LZ4 compression
   RedisEvents.EventSourcing/ event-sourced aggregate root + optimistic-concurrency repository (write side)
   RedisEvents.Projections/   typed event projector + view stores on any standard topic (read side); no

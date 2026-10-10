@@ -2,9 +2,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<!--
-	  R-25 (headless split). Everything in RedisEvents that needs ASP.NET Core or the
-	  health-check abstractions lives here, so a worker with no web host can reference
-	  RedisEvents alone. The regression guard for that is tst/RedisEvents.HeadlessSmoke.
+	  R-25 (headless split). Everything in RedisEvents that needs ASP.NET Core lives here (the
+	  admin endpoints), so a worker with no web host can reference RedisEvents alone. The health
+	  check is host-neutral and lives in RedisEvents.HealthChecks. The regression guard for that is tst/RedisEvents.HeadlessSmoke.
 	-->
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
@@ -13,7 +13,7 @@
 		<InvariantGlobalization>true</InvariantGlobalization>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 		<IsAotCompatible>true</IsAotCompatible>
-		<Description>ASP.NET Core health checks and minimal-API admin endpoints for RedisEvents, kept separate so a headless worker can reference the core library without pulling in ASP.NET Core.</Description>
+		<Description>Minimal-API admin endpoints for RedisEvents (and, by reference, the RedisEvents.HealthChecks stream health check), kept separate so a headless worker can reference the core library without pulling in ASP.NET Core.</Description>
 		<PackageTags>redis;redis-streams;messaging;aspnetcore;health-checks</PackageTags>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
@@ -24,6 +24,8 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+		<!-- The health check moved to the ASP.NET-free RedisEvents.HealthChecks; referenced so a web service still gets it from this package. -->
+		<ProjectReference Include="../RedisEvents.HealthChecks/RedisEvents.HealthChecks.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

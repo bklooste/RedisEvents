@@ -1,4 +1,5 @@
 using FluentAssertions;
+using RedisEvents.HealthChecks;
 using RedisEvents.Diagnostics;
 using RedisEvents.Wire;
 

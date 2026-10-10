@@ -1,0 +1,42 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  The health-check adapter over RedisEvents.Diagnostics.StreamHealth, for any host: a Generic
+	  Host worker and an ASP.NET Core service register the same check. It is its own package so
+	  that core takes no dependency on the health-check abstractions, and so that a worker does
+	  not need RedisEvents.Web, which carries the ASP.NET Core framework reference.
+
+	  NEVER add <FrameworkReference Include="Microsoft.AspNetCore.App" /> or an AspNetCore package
+	  here: a FrameworkReference flows to every consumer.
+	-->
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>Host-neutral health check for RedisEvents stream consumers (Microsoft.Extensions.Diagnostics.HealthChecks), with no ASP.NET Core dependency, so a headless worker and a web service register the same check.</Description>
+		<PackageTags>redis;redis-streams;messaging;health-checks;worker</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.2" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
+		<InternalsVisibleTo Include="RedisEvents.Tests" />
+	</ItemGroup>
+
+</Project>

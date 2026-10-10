@@ -4,6 +4,33 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-11
+
+### Changed (breaking)
+
+- **`StreamsHealthCheck` and `AddStreamsHealthCheck()` moved to a new package, `RedisEvents.HealthChecks`**
+  (namespace `RedisEvents.HealthChecks`, was `RedisEvents.Web`). The check only ever needed
+  `Microsoft.Extensions.Diagnostics.HealthChecks`, never ASP.NET Core, but it lived beside the admin
+  endpoints in the package that carries the framework reference, so a Generic Host worker could not
+  use it and had to write its own adapter over `StreamHealth`. Now a worker and a web service
+  register the same check.
+  - **Migrating:** add `using RedisEvents.HealthChecks;`. A service that references `RedisEvents.Web`
+    needs no new package reference (Web references the new package); a worker references
+    `RedisEvents.HealthChecks` instead of writing an adapter.
+
+### Added
+
+- **`ConsumerOptions.DegradedSilenceSeconds`: a consumer that is caught up and receiving nothing is
+  Degraded** (rule `StreamHealthRule.Silent`; default `0` = off). It is the other half of
+  `UnhealthyBehindSeconds`, read off the same clock: a position that has stopped moving either has an
+  entry waiting (behind: the consumer is at fault, Unhealthy) or has none (silent). Judged per
+  consumer, and only when every partition of it that the instance is reading is at the tail and
+  unmoved for the window. `StreamHealth.FindSilent` exposes the fact on its own.
+  - **Why there is no Unhealthy option.** A caught-up consumer with nothing to read is working. The
+    topic is quiet, its producer is broken, or the consumer reads a key nothing writes to; a restart
+    changes none of those, so failing the pod on silence is a restart loop for as long as the topic
+    is quiet, each restart handing partitions on for nothing. Alert on the Degraded report instead.
+
 ## 2026-10-10
 
 ### Added

@@ -71,6 +71,11 @@ jobs:
           dotnet pack src/RedisEvents/RedisEvents.csproj
           -c Release --no-restore -o nupkgs
 
+      - name: Pack RedisEvents.HealthChecks
+        run: >
+          dotnet pack src/RedisEvents.HealthChecks/RedisEvents.HealthChecks.csproj
+          -c Release --no-restore -o nupkgs
+
       - name: Pack RedisEvents.Web
         run: >
           dotnet pack src/RedisEvents.Web/RedisEvents.Web.csproj

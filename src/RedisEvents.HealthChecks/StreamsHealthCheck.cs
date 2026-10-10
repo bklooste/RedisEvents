@@ -3,7 +3,7 @@ using Microsoft.Extensions.Hosting;
 using RedisEvents.Diagnostics;
 using RedisEvents.Extensions;
 
-namespace RedisEvents.Web;
+namespace RedisEvents.HealthChecks;
 
 /// <summary>
 /// The readiness answer for every stream consumer in this process, registered under the tag
@@ -20,7 +20,8 @@ namespace RedisEvents.Web;
 ///   <term>Degraded</term>
 ///   <description>A partition is blocked retrying a <c>DontIgnoreException</c>, has stopped under
 ///   <c>ErrorPolicy.StopPartition</c>, is lagging past the threshold, the ownership registry shows
-///   a gap or an overlap, or no partition has started reading yet.</description>
+///   a gap or an overlap, no partition has started reading yet, or a consumer is caught up and
+///   receiving nothing past <c>DegradedSilenceSeconds</c> (default 0 = off).</description>
 /// </item>
 /// <item>
 ///   <term>Unhealthy</term>
