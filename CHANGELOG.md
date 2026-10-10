@@ -8,6 +8,54 @@ actually changed.
 
 ### Added
 
+- **`ConsumerOptions.UnhealthyBehindSeconds`: a partition behind the tail of its stream with a
+  position that does not change is Unhealthy** (default `0` = off, so no existing consumer changes
+  behaviour). The rule is a comparison of ids, not of the consumer's own bookkeeping: the last
+  entry's id is strictly greater than the partition's position — there is provably an unread entry —
+  and the position has not changed for that many seconds.
+  - **Why not `UnhealthyLagMs`.** `LagMs` is the age of the last processed entry, which grows without
+    bound on an idle topic, so on a bursty topic it fires when nothing is wrong; and restarting a
+    consumer that is merely behind makes the backlog worse. Lag stays Degraded. This rule cannot fire
+    on a consumer that is advancing (any change of position restarts the clock, however large the
+    backlog) or on a caught-up consumer on an idle topic (tail = position), so one window means the
+    same thing on a busy topic and a quiet one.
+  - **Why not `LagEntries > 0 && !IsCaughtUp`.** Those are the consumer's account of itself, which
+    is what a wedged consumer gets wrong — it reports `-1` or sits `IsCaughtUp` and the clock never
+    starts. The tail is read from Redis by the lag sampler, from the `XINFO STREAM` it already
+    issues per partition every 15 seconds; no round trip was added.
+  - The clock starts when a sample first finds the partition behind (not when the position last
+    changed — an entry landing after a day of silence gets the whole window) and, under Lease
+    ownership, no earlier than the acquisition. A tail that has never been sampled, or whose sample
+    is over 60 seconds old, is unknown, and unknown is not Unhealthy. An empty stream and a position
+    past the tail after a trim are not behind.
+  - It grades running and starting partitions. A blocked partition still answers to
+    `UnhealthyBlockSeconds` and a stopped one to `UnhealthyStoppedSeconds`; an `ErrorPolicy` stop
+    stays Degraded. It is ignored under `Delivery = WorkQueue`.
+- **`StreamHealth` in core: the health rules have one implementation, and a worker can call it.**
+  `StreamHealth.Evaluate(IServiceProvider)` returns a `StreamHealthReport` — `Status`
+  (`StreamHealthStatus`), the `Rule` that fired (`StreamHealthRule`), `Description`, `Data`, and the
+  offending `Partition`. `StreamsHealthCheck` in `RedisEvents.Web` is now an adapter over it, with
+  the same descriptions and data keys as before (plus `partitionsBehind`). A Generic Host worker,
+  which cannot reference `RedisEvents.Web` without the ASP.NET Core framework reference, no longer
+  has to re-implement the grading from the snapshot. `Evaluate(partitions, context)` is the same
+  verdict as a pure function and `Grade(in partition)` grades one partition. Core still does not
+  reference `Microsoft.Extensions.Diagnostics.HealthChecks`: the report is the library's own type.
+- **`StreamPartitionStatus` carries what the grading reads.** `Escalates` (whether a stop turns
+  Unhealthy — previously only inferable from the wording of `StopReason`), `Position` and
+  `PositionUnchangedMs`, `TailId`, `TailSampleAgeMs` and `TailUnchangedMs`, `IsBehindTail`,
+  `BehindMs`, and `UnhealthyBehindSeconds`. All are optional members with defaults, so code that
+  constructs a status keeps compiling. The library takes no view on a silent topic — an empty stream
+  at position `0-0` is not behind — but `PositionUnchangedMs` and `TailUnchangedMs` are what a host
+  that knows data should be arriving needs to judge that itself.
+
+### Fixed
+
+- **`LagEntries` was the whole stream length between a restart and the first batch.** The sampler
+  estimated it from `LastProcessed`, which reads `0-0` until something is processed, so a restarted,
+  caught-up consumer on a quiet topic reported every surviving entry as backlog. It is now estimated
+  from the position the consumer resumed at. `StreamPartitionStatus.LastProcessed` itself is
+  unchanged; the new `Position` is the one that carries the resume position.
+
 - **`RedisViewStore<TView>` and `AddRedisViewStore<TView>` take an optional explicit `owner`.** The
   view's Redis key is `<env>:re:{topic}:view:<owner>:<viewName>`, and `<owner>` was always the entry
   assembly's name with no override — so a view written by one process (a projection worker) and read by

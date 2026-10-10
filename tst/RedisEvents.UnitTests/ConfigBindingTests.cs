@@ -70,6 +70,7 @@ public class ConfigBindingTests
             "ReaderThreads": 2,
             "ShutdownTimeoutSeconds": 30,
             "UnhealthyLagMs": 45000,
+            "UnhealthyBehindSeconds": 240,
             "StartFromWhenMissing": "Now"
           }
         ],
@@ -151,6 +152,7 @@ public class ConfigBindingTests
         consumer.ReaderThreads.Should().Be(2);
         consumer.ShutdownTimeoutSeconds.Should().Be(30);
         consumer.UnhealthyLagMs.Should().Be(45_000);
+        consumer.UnhealthyBehindSeconds.Should().Be(240);
         consumer.StartFromWhenMissing.Should().Be(StartFrom.Now);
         consumer.Instances.Should().NotBeNull();
         consumer.Instances!.Count.Should().Be(3);

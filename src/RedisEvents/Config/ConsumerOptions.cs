@@ -90,6 +90,40 @@ public sealed record ConsumerOptions
     public int UnhealthyStoppedSeconds { get; set; } = 300;
 
     /// <summary>
+    /// Seconds a partition may sit behind the tail of its stream with a position that does not
+    /// change before health reports Unhealthy (default: 0, which turns the rule off).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule: the id of the stream's last entry is strictly greater than this partition's
+    /// position — so there is provably an entry it has not read — and that position has not changed
+    /// for this long. Any change of position restarts the clock, so a consumer that is behind but
+    /// advancing is never failed by it however large its backlog, and a caught-up consumer on an
+    /// idle topic is never behind at all. One window therefore means the same thing on a busy topic
+    /// and a quiet one, with no guess about traffic.
+    /// </para>
+    /// <para>
+    /// <b>This is not <see cref="UnhealthyLagMs"/> with a different action.</b> Lag is the age of the
+    /// last processed entry: it says how old the work is, not whether any is waiting, so it grows
+    /// without bound on an idle topic and fires on a bursty one when nothing is wrong. It is
+    /// Degraded for that reason. This rule compares against the tail the lag sampler reads from
+    /// Redis every 15 seconds, an outside measurement the consumer's own bookkeeping cannot
+    /// corrupt, which is what makes it safe to restart on. Allow for that interval: a value below
+    /// about 30 gives the consumer less than two samples to be seen moving. And set it longer than
+    /// the slowest batch the handler can legitimately take: the position moves when a batch
+    /// completes, so a single batch that outlasts this window looks exactly like a wedge.
+    /// </para>
+    /// <para>
+    /// It grades partitions that are running or starting. A partition blocked retrying a
+    /// <c>DontIgnoreException</c> answers to <see cref="UnhealthyBlockSeconds"/> and a stopped one to
+    /// <see cref="UnhealthyStoppedSeconds"/>, whichever is shorter here. It is ignored under
+    /// <see cref="DeliveryMode.WorkQueue"/>: there the entries of a partition are shared between
+    /// members, so one member legitimately sits behind a tail another member read.
+    /// </para>
+    /// </remarks>
+    public int UnhealthyBehindSeconds { get; set; }
+
+    /// <summary>
     /// Seconds an overlap with another live instance must persist before a
     /// <see cref="InstanceMode.Static"/> consumer stands the partition down (default: 60).
     /// </summary>

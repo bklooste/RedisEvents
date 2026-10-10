@@ -308,6 +308,7 @@ Keys worth knowing, with their defaults:
 | `Consumers[n]:StartFrom` | `Stored` | `Stored` with `Persist: None` is a contradiction and is refused at startup |
 | `Consumers[n]:Backpressure:Capacity` | `4` | Batches in flight per partition |
 | `Consumers[n]:Delivery` | `Ordered` | `WorkQueue` gives up per-key ordering — see below |
+| `Consumers[n]:UnhealthyBehindSeconds` | `0` (off) | The only health threshold safe to restart on: behind the tail with a frozen position. Set it shorter than your slowest batch and a healthy consumer is restarted mid-batch — see [Health](#health-one-set-of-rules-two-hosts) |
 
 Misconfiguration throws `StreamConfigurationException` at startup, with the offending key named in
 the message. It never waits until 3am to tell you.
@@ -753,35 +754,113 @@ return map.Unowned;
 
 ---
 
-## Reading partition health in process
+## Health: one set of rules, two hosts
 
-`RedisEvents.Web`'s `StreamsHealthCheck` grades every partition for an ASP.NET `/health` endpoint.
-A Generic Host worker has no such endpoint, and metrics are the wrong place to make a decision —
-so `StreamStatus` exposes the same signals the check reads:
+`StreamHealth` grades every partition this process reads into Healthy, Degraded or Unhealthy. It
+lives in core, so both kinds of host run the same rules: `RedisEvents.Web`'s `StreamsHealthCheck` is
+an adapter that turns its report into a `HealthCheckResult` for `/health`, and a Generic Host worker
+— which cannot reference that package without taking the ASP.NET Core framework with it — calls it
+directly:
+
+```csharp
+var report = StreamHealth.Evaluate(services);   // partitions + consumer hosts + the shared connection
+
+if (report.Status == StreamHealthStatus.Unhealthy)
+{
+    logger.LogCritical("Streams unhealthy ({Rule}): {Description}", report.Rule, report.Description);
+    lifetime.StopApplication();   // graceful: the claim is released, so the replacement starts clean
+}
+```
+
+`report.Rule` names the rule that fired, so a host acts on an enum, not on the wording of
+`Description`. Core does not reference `Microsoft.Extensions.Diagnostics.HealthChecks`; if your
+worker wraps this in an `IHealthCheck`, map `StreamHealthStatus` to `HealthStatus` by name with a
+`switch` — the two enums number in opposite directions.
+
+| Verdict | When |
+|---|---|
+| **Unhealthy** | The Redis connection is down · a partition blocked past `UnhealthyBlockSeconds` · a partition whose stop `Escalates`, stopped past `UnhealthyStoppedSeconds` with entries waiting · a partition **behind the tail with a frozen position** past `UnhealthyBehindSeconds` (off by default) · no registered consumer started · every partition stopped |
+| **Degraded** | Nothing has started reading yet · a partition blocked or stopped inside its threshold, or stopped by `ErrorPolicy` · lag past `UnhealthyLagMs` · an ownership gap or overlap |
+
+### Why lag never restarts a consumer, and what does
+
+`UnhealthyLagMs` is Degraded and stays Degraded, for two reasons. Restarting a consumer whose only
+problem is a backlog drops its in-flight batches and makes the backlog worse, on a loop. And `LagMs`
+is the *age of the last processed entry* — it says how old the work is, not whether any is waiting.
+On a bursty topic it is largest exactly when the consumer is idle and caught up, so as a restart
+trigger it fires when nothing is wrong.
+
+`UnhealthyBehindSeconds` is the rule that is safe to restart on:
+
+> the id of the stream's last entry is **strictly greater** than the partition's position — there is
+> provably an entry it has not read — **and** that position has not changed for N seconds.
+
+```json
+"Streams": { "Consumers": [ { "Topic": "orders", "UnhealthyBehindSeconds": 300 } ] }
+```
+
+- **Any change of position restarts the clock.** A consumer that is behind but advancing is never
+  failed, however large the backlog.
+- **A caught-up consumer on an idle topic is never behind** (tail = position), for a day or a year.
+  When the next entry lands the clock starts *then*; the consumer gets the whole window to read it.
+- **It does not trust the consumer.** The tail is read from Redis by the lag sampler — the
+  `XINFO STREAM` it already issues per partition every 15 seconds for `streams.lag.entries`, so it
+  costs no extra round trip. `LagEntries` and `IsCaughtUp` are the consumer's own account of itself,
+  which is exactly what a wedged consumer gets wrong, and the rule reads neither.
+- **Unknown is not Unhealthy.** Before the first sample, or once a sample is more than 60 seconds
+  old (four missed samples), the partition is not graded behind. So is an empty stream, and a
+  position left ahead of the tail by a trim.
+- **Only partitions this instance reads are graded.** Under `Instances:Mode = Lease` a partition
+  another instance holds has no monitor here at all, and a newly acquired one starts its clock at
+  acquisition.
+- **Declared states keep their own thresholds.** A partition blocked on a `DontIgnoreException`
+  answers to `UnhealthyBlockSeconds` and a stopped one to `UnhealthyStoppedSeconds`, not to this
+  window; an `ErrorPolicy.StopPartition` stop stays Degraded, because a restart would only replay the
+  entry it stopped on. When several rules fire at once the report names the first of: connection,
+  blocked too long, stopped too long, behind the tail.
+
+Choose N longer than the slowest batch the handler can legitimately take — the position moves when a
+batch completes — and not below about 30, which leaves fewer than two tail samples. Detection takes
+between N and N + 15 seconds. It is ignored under `Delivery = WorkQueue`, where members share a
+partition's entries and one of them sitting behind a tail another read is normal. Leave it at 0 for
+a consumer whose backlog is meant to sit (a restart helps nothing there).
+
+What it cannot see: a consumer reading the *wrong* stream — a mismatched key prefix — finds an empty
+stream whose tail legitimately equals its position. Only a host that knows data should be arriving
+can call that a fault; the snapshot below carries what such a host needs, and the library takes no
+view.
+
+### Reading the signals yourself
+
+`StreamStatus.Partitions()` is the snapshot `StreamHealth` grades, for a host that wants its own
+policy, its own metric, or a diagnostic endpoint that says more than one word:
 
 ```csharp
 foreach (var p in StreamStatus.Partitions())
 {
-    if (p.State == StreamPartitionRunState.Stopped && p.StoppedMs > p.UnhealthyStoppedSeconds * 1000)
+    // "Nothing written and nothing read for ten minutes" on a topic this service knows is busy.
+    if (!p.IsBehindTail && p.TailId is not null
+        && p.PositionUnchangedMs > 600_000 && p.TailUnchangedMs > 600_000)
     {
-        logger.LogCritical("{Topic}/{Consumer} partition {Partition} stood down ({Reason}) — stopping",
-            p.Topic, p.Consumer, p.Partition, p.StopReason);
-        lifetime.StopApplication();   // graceful: the claim is released, so the replacement starts clean
+        logger.LogWarning("{Topic}[{Partition}]/{Consumer} has been silent for {Seconds:F0}s (position {Position}, tail {Tail})",
+            p.Topic, p.Partition, p.Consumer, p.PositionUnchangedMs / 1000, p.Position, p.TailId);
     }
 }
 ```
 
 Each `StreamPartitionStatus` is a snapshot, not a handle: the monitors stay internal and a reading
-cannot change under you. It carries the identity (`Topic`, `Consumer`, `Partition`), the run state
-and `StopReason`, the backlog (`LagEntries`, `-1` when the sampler has not run; `LagMs`;
-`BlockedMs`; `StoppedMs`), and that consumer's own thresholds, so a caller can apply the configured
-`UnhealthyLagMs` rather than inventing one.
+cannot change under you. It carries:
 
-**`LastProcessed` and `IsCaughtUp` are what separate a stalled partition from a busy one.** Compare
-two snapshots: a position that advances is a consumer catching up, and restarting it drops its
-in-flight batches and makes the backlog worse. A position that stands still while `LagEntries` is
-positive is stuck, and that is the only shape a restart fixes. A partition that is `IsCaughtUp` is
-idle at the tail — its position standing still means nothing has arrived, which is not a fault.
+| | |
+|---|---|
+| Identity and state | `Topic`, `Consumer`, `Partition`, `State`, `StopReason`, and `Escalates` — whether a stop turns Unhealthy; read this, not the wording of `StopReason` |
+| Progress | `Position` (where it has read up to; unlike `LastProcessed` it is the resume position, not `0-0`, between a restart and the first batch) and `PositionUnchangedMs` |
+| The stream | `TailId` (last entry's id; `0-0` when empty; `null` before the first sample), `TailSampleAgeMs`, `TailUnchangedMs` (since a sample last found a new entry; a trim does not count) |
+| The verdict's inputs | `IsBehindTail`, `BehindMs` (continuously behind with a frozen position), `BlockedMs`, `StoppedMs`, `LagMs`, `LagEntries` (`-1` when the sampler has not run), `IsCaughtUp` |
+| Thresholds | `UnhealthyLagMs`, `UnhealthyBlockSeconds`, `UnhealthyStoppedSeconds`, `UnhealthyBehindSeconds` — that consumer's own, so a caller applies the configured value instead of inventing one |
+
+`StreamHealth.Grade(in p)` grades one partition on those; `StreamHealth.Evaluate(partitions, context)`
+is the whole verdict as a pure function, for a filtered snapshot or a test.
 
 Poll it on a timer from a health check or a watchdog, never on a message path: it allocates per
 partition.

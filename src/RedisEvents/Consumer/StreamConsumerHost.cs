@@ -1043,7 +1043,9 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 key,
                 this.consumer.UnhealthyLagMs,
                 this.consumer.UnhealthyBlockSeconds,
-                this.consumer.UnhealthyStoppedSeconds);
+                this.consumer.UnhealthyStoppedSeconds,
+                this.consumer.UnhealthyBehindSeconds,
+                startPosition: from[i]);
 
             this.monitors.Add(monitor);
 
@@ -1214,7 +1216,9 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 key,
                 this.consumer.UnhealthyLagMs,
                 this.consumer.UnhealthyBlockSeconds,
-                this.consumer.UnhealthyStoppedSeconds);
+                this.consumer.UnhealthyStoppedSeconds,
+                this.consumer.UnhealthyBehindSeconds,
+                startPosition: from[i]);
 
             this.monitors.Add(monitor);
 
@@ -1422,7 +1426,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             key,
             this.consumer.UnhealthyLagMs,
             this.consumer.UnhealthyBlockSeconds,
-            this.consumer.UnhealthyStoppedSeconds);
+            this.consumer.UnhealthyStoppedSeconds,
+
+            // A work queue shares a partition's entries between members, so this member sitting
+            // behind a tail that another member read is normal, and it has no cursor of its own to
+            // compare. The behind-the-tail rule is off there whatever the option says.
+            useGroup ? 0 : this.consumer.UnhealthyBehindSeconds,
+            startPosition: from);
 
         this.monitors.Add(monitor);
 
