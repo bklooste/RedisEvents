@@ -52,6 +52,7 @@ public static class CoLocatedInline
 }
 
 /// <summary>R-06 — the co-located inline loop's transport handling and monitor updates.</summary>
+[Collection(StreamMonitorCollection.Name)]
 public class CoLocatedInlineLoopTests
 {
     /// <summary>

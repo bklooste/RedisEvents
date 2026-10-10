@@ -11,6 +11,7 @@ namespace RedisEvents.UnitTests;
 /// These pin the snapshot's contract: every field reaches the caller, a stalled partition is
 /// distinguishable from an idle one, and the snapshot does not move after it is taken.
 /// </summary>
+[Collection(StreamMonitorCollection.Name)]
 public sealed class StreamStatusTests : IDisposable
 {
     public StreamStatusTests() => StreamLag.Clear();

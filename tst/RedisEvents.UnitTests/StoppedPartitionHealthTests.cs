@@ -13,6 +13,7 @@ namespace RedisEvents.UnitTests;
 /// Unhealthy once it has outlasted <c>UnhealthyStoppedSeconds</c> with entries behind it, while an
 /// <c>ErrorPolicy.StopPartition</c> stop — an operator's decision — stays Degraded.
 /// </summary>
+[Collection(StreamMonitorCollection.Name)]
 public sealed class StoppedPartitionHealthTests : IDisposable
 {
     public StoppedPartitionHealthTests() => StreamLag.Clear();

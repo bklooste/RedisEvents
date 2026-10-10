@@ -25,6 +25,23 @@ internal enum PartitionRunState
     Stopped = 3,
 }
 
+/// <summary>One reading of a partition's progress against the tail of its stream.</summary>
+/// <param name="Position">Where the partition has read up to.</param>
+/// <param name="PositionUnchangedMs">Milliseconds since that position last changed.</param>
+/// <param name="Tail">The last sampled tail id; <see langword="null"/> before the first sample.</param>
+/// <param name="TailSampleAgeMs">Milliseconds since the tail was sampled, or <c>-1</c>.</param>
+/// <param name="TailUnchangedMs">Milliseconds since a sample last found a new last entry, or <c>-1</c>.</param>
+/// <param name="BehindMs">Milliseconds continuously behind the tail with a frozen position; 0 when not behind.</param>
+/// <param name="IsBehind">Whether a fresh tail sample is strictly ahead of the position.</param>
+internal readonly record struct TailProgress(
+    StreamId Position,
+    double PositionUnchangedMs,
+    StreamId? Tail,
+    double TailSampleAgeMs,
+    double TailUnchangedMs,
+    double BehindMs,
+    bool IsBehind);
+
 /// <summary>
 /// The per-partition health signals: how far behind it is, and whether its worker is running,
 /// blocked or stopped.
@@ -63,6 +80,21 @@ internal sealed class StreamPartitionMonitor
     private int escalates;
     private string? stopReason;
 
+    // Progress against the stream's tail. Guarded by progressGate rather than Volatile: these are
+    // read and written together, once a second at most, and never from the processing loop.
+    private readonly Lock progressGate = new();
+    private readonly TimeProvider clock;
+    private readonly StreamId startPosition;
+    private StreamId notedPosition;
+    private long positionChangedAt;
+    private bool tailSampled;
+    private StreamId tail;
+    private StreamId lastEntrySeen;
+    private long tailSampledAt;
+    private long tailChangedAt;
+    private bool behind;
+    private long behindSince;
+
     internal StreamPartitionMonitor(
         string topic,
         string consumer,
@@ -70,7 +102,10 @@ internal sealed class StreamPartitionMonitor
         RedisKey streamKey,
         int unhealthyLagMs,
         int unhealthyBlockSeconds,
-        int unhealthyStoppedSeconds = 300)
+        int unhealthyStoppedSeconds = 300,
+        int unhealthyBehindSeconds = 0,
+        StreamId startPosition = default,
+        TimeProvider? clock = null)
     {
         this.Topic = topic;
         this.Consumer = consumer;
@@ -79,6 +114,14 @@ internal sealed class StreamPartitionMonitor
         this.UnhealthyLagMs = unhealthyLagMs;
         this.UnhealthyBlockSeconds = unhealthyBlockSeconds;
         this.UnhealthyStoppedSeconds = unhealthyStoppedSeconds;
+        this.UnhealthyBehindSeconds = unhealthyBehindSeconds;
+        this.clock = clock ?? TimeProvider.System;
+        this.startPosition = startPosition;
+        this.notedPosition = startPosition;
+
+        // The frozen-position clock starts when this instance starts reading the partition — at
+        // acquisition under Lease, not at process start: a monitor is created per acquisition.
+        this.positionChangedAt = this.clock.GetTimestamp();
         this.MetricKey = StreamLag.Key(topic, consumer, partition);
         this.StreamMetricKey = string.Concat(topic, ":", partition.ToString(CultureInfo.InvariantCulture));
     }
@@ -111,6 +154,12 @@ internal sealed class StreamPartitionMonitor
     internal int UnhealthyStoppedSeconds { get; }
 
     /// <summary>
+    /// Seconds a partition may sit behind the tail of its stream with a position that does not move
+    /// before the health check reports Unhealthy; 0 turns the rule off.
+    /// </summary>
+    internal int UnhealthyBehindSeconds { get; }
+
+    /// <summary>
     /// Whether this stop should turn Unhealthy once it has lasted <see cref="UnhealthyStoppedSeconds"/>
     /// with the stream still moving. A contested or co-located stand-down is nobody's decision — the
     /// partition is simply not being read and only a restart brings it back. An
@@ -125,7 +174,7 @@ internal sealed class StreamPartitionMonitor
         {
             var since = Volatile.Read(ref this.stoppedSince);
 
-            return since == 0 ? 0 : Stopwatch.GetElapsedTime(since).TotalMilliseconds;
+            return since == 0 ? 0 : this.clock.GetElapsedTime(since).TotalMilliseconds;
         }
     }
 
@@ -142,6 +191,25 @@ internal sealed class StreamPartitionMonitor
             var ms = Volatile.Read(ref this.lastProcessedMs);
 
             return ms < 0 ? StreamId.Min : new StreamId(ms, Volatile.Read(ref this.lastProcessedSeq));
+        }
+    }
+
+    /// <summary>
+    /// Where this partition has read up to: <see cref="LastProcessed"/> once it has processed a
+    /// batch, and before that the position it started from.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="LastProcessed"/> alone reads <c>0-0</c> between a restart and the first batch, which
+    /// on a quiet topic is indefinitely — and <c>0-0</c> is behind every non-empty stream. Comparing
+    /// that against the tail would call every restarted, caught-up consumer behind.
+    /// </remarks>
+    internal StreamId Position
+    {
+        get
+        {
+            var ms = Volatile.Read(ref this.lastProcessedMs);
+
+            return ms < 0 ? this.startPosition : new StreamId(ms, Volatile.Read(ref this.lastProcessedSeq));
         }
     }
 
@@ -167,7 +235,7 @@ internal sealed class StreamPartitionMonitor
                 return 0;
             }
 
-            var lag = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - ms;
+            var lag = this.clock.GetUtcNow().ToUnixTimeMilliseconds() - ms;
 
             // The id's timestamp is Redis's clock and "now" is ours; a small negative reading is
             // skew, not negative lag.
@@ -188,7 +256,7 @@ internal sealed class StreamPartitionMonitor
         {
             var since = Volatile.Read(ref this.blockedSince);
 
-            return since == 0 ? 0 : Stopwatch.GetElapsedTime(since).TotalMilliseconds;
+            return since == 0 ? 0 : this.clock.GetElapsedTime(since).TotalMilliseconds;
         }
     }
 
@@ -223,6 +291,83 @@ internal sealed class StreamPartitionMonitor
     /// <param name="entries">Entries behind the tail, or <c>-1</c> for unknown.</param>
     internal void SetLagEntries(long entries) => Volatile.Write(ref this.lagEntries, entries);
 
+    /// <summary>
+    /// Records one sample of the stream's tail and re-judges whether this partition is behind it.
+    /// </summary>
+    /// <param name="lastEntry">
+    /// The id of the last entry in the stream, or <see cref="StreamId.Min"/> when the stream is empty
+    /// or does not exist — in which case there is nothing unread, whatever the position.
+    /// </param>
+    /// <remarks>
+    /// Called by the sampler from the <c>XINFO STREAM</c> reply it already fetches for
+    /// <c>streams.lag.entries</c>, so the tail costs no extra round trip.
+    /// </remarks>
+    internal void SetTail(StreamId lastEntry)
+    {
+        lock (this.progressGate)
+        {
+            var now = this.clock.GetTimestamp();
+
+            // A trim that empties the stream is not the tail moving: only a new last entry is. So
+            // "the tail last changed" keeps meaning "an entry was last written", which is what a host
+            // judging silence wants to know.
+            if (!this.tailSampled || (lastEntry != StreamId.Min && lastEntry != this.lastEntrySeen))
+            {
+                this.tailChangedAt = now;
+            }
+
+            if (lastEntry != StreamId.Min)
+            {
+                this.lastEntrySeen = lastEntry;
+            }
+
+            this.tail = lastEntry;
+            this.tailSampled = true;
+            this.tailSampledAt = now;
+
+            this.NoteProgress(now);
+        }
+    }
+
+    /// <summary>
+    /// Notices a position change and restarts the frozen-position clock. Called once a second by the
+    /// sampler's push timer and again whenever progress is read, so the processing loop never pays
+    /// for it and a reader never grades a position that moved since the last tick.
+    /// </summary>
+    internal void RefreshProgress()
+    {
+        lock (this.progressGate)
+        {
+            this.NoteProgress(this.clock.GetTimestamp());
+        }
+    }
+
+    /// <summary>Reads this partition's progress against its tail, as of now.</summary>
+    internal TailProgress ReadProgress()
+    {
+        lock (this.progressGate)
+        {
+            var now = this.clock.GetTimestamp();
+            this.NoteProgress(now);
+
+            var sampleAge = this.tailSampled ? this.ElapsedMs(this.tailSampledAt, now) : -1;
+
+            // A sample that has stopped arriving says nothing about now. The behind clock is not
+            // cleared — if sampling resumes and the partition is still behind, it was behind all
+            // along — but while the tail is unknown the partition is not reported behind.
+            var fresh = this.tailSampled && sampleAge <= StreamLag.TailStaleAfter.TotalMilliseconds;
+
+            return new TailProgress(
+                this.notedPosition,
+                this.ElapsedMs(this.positionChangedAt, now),
+                this.tailSampled ? this.tail : null,
+                sampleAge,
+                this.tailSampled ? this.ElapsedMs(this.tailChangedAt, now) : -1,
+                this.behind && fresh ? this.ElapsedMs(this.behindSince, now) : 0,
+                this.behind && fresh);
+        }
+    }
+
     /// <summary>The worker is reading. Clears any block and any stop reason.</summary>
     internal void MarkRunning()
     {
@@ -242,7 +387,7 @@ internal sealed class StreamPartitionMonitor
     {
         Volatile.Write(ref this.state, (int)PartitionRunState.Blocked);
 
-        if (Interlocked.CompareExchange(ref this.blockedSince, Stopwatch.GetTimestamp(), 0) == 0)
+        if (Interlocked.CompareExchange(ref this.blockedSince, this.clock.GetTimestamp(), 0) == 0)
         {
             StreamsDiagnostics.SetBlockedGauge(this.MetricKey, 1);
         }
@@ -268,7 +413,7 @@ internal sealed class StreamPartitionMonitor
     {
         Volatile.Write(ref this.stopReason, reason);
 
-        if (Interlocked.CompareExchange(ref this.stoppedSince, Stopwatch.GetTimestamp(), 0) == 0)
+        if (Interlocked.CompareExchange(ref this.stoppedSince, this.clock.GetTimestamp(), 0) == 0)
         {
             Volatile.Write(ref this.escalates, escalate ? 1 : 0);
         }
@@ -280,6 +425,7 @@ internal sealed class StreamPartitionMonitor
     /// <summary>Pushes the locally computed lag onto its gauge. Called by the sampler's timer.</summary>
     internal void PublishLagMs()
     {
+        this.RefreshProgress();
         StreamsDiagnostics.SetLagMs(this.MetricKey, this.LagMs);
 
         if (Volatile.Read(ref this.blockedSince) != 0)
@@ -287,6 +433,45 @@ internal sealed class StreamPartitionMonitor
             StreamsDiagnostics.SetBlockDurationMs(this.MetricKey, this.BlockedMs);
         }
     }
+
+    /// <summary>
+    /// The one place the behind clock moves. Caller holds <see cref="progressGate"/>.
+    /// </summary>
+    /// <remarks>
+    /// The clock measures "behind the tail AND not moving", so it restarts on either half failing:
+    /// any position change (a consumer that is behind but advancing never accumulates time, however
+    /// large its backlog), and any sample that finds the position at or past the tail. It starts when
+    /// the partition is first <em>seen</em> behind, not when the position last changed — otherwise a
+    /// topic that was idle for a day would be a day "behind" the instant its next entry landed.
+    /// It deliberately ignores <see cref="LagEntries"/> and <see cref="IsCaughtUp"/>: those are the
+    /// consumer's own account of itself, which is what a wedged consumer gets wrong.
+    /// </remarks>
+    private void NoteProgress(long now)
+    {
+        var position = this.Position;
+
+        if (position != this.notedPosition)
+        {
+            this.notedPosition = position;
+            this.positionChangedAt = now;
+            this.behind = false;
+        }
+
+        if (this.tailSampled && this.tail > position)
+        {
+            if (!this.behind)
+            {
+                this.behind = true;
+                this.behindSince = now;
+            }
+        }
+        else
+        {
+            this.behind = false;
+        }
+    }
+
+    private double ElapsedMs(long from, long to) => this.clock.GetElapsedTime(from, to).TotalMilliseconds;
 
     private void ClearBlock()
     {
@@ -322,6 +507,12 @@ internal static class StreamLag
     /// </remarks>
     internal static TimeSpan DefaultPushInterval => TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// How old a tail sample may be before it stops counting as knowledge of the tail: four missed
+    /// samples. Past this a partition is not graded behind — unknown is not Unhealthy.
+    /// </summary>
+    internal static TimeSpan TailStaleAfter => DefaultSampleInterval * 4;
+
     /// <summary>Every monitor registered in this process.</summary>
     internal static ICollection<StreamPartitionMonitor> All => Monitors.Values;
 
@@ -343,6 +534,9 @@ internal static class StreamLag
     /// <param name="unhealthyLagMs">Lag threshold from <c>ConsumerOptions.UnhealthyLagMs</c>.</param>
     /// <param name="unhealthyBlockSeconds">Block threshold from <c>ConsumerOptions.UnhealthyBlockSeconds</c>.</param>
     /// <param name="unhealthyStoppedSeconds">Stood-down threshold from <c>ConsumerOptions.UnhealthyStoppedSeconds</c>.</param>
+    /// <param name="unhealthyBehindSeconds">Behind-the-tail threshold from <c>ConsumerOptions.UnhealthyBehindSeconds</c>; 0 is off.</param>
+    /// <param name="startPosition">The position this instance starts reading after.</param>
+    /// <param name="clock">Clock for every duration the monitor reports; the system clock when null.</param>
     /// <returns>The monitor for that partition.</returns>
     internal static StreamPartitionMonitor Track(
         string topic,
@@ -351,13 +545,25 @@ internal static class StreamLag
         RedisKey streamKey,
         int unhealthyLagMs = 120_000,
         int unhealthyBlockSeconds = 300,
-        int unhealthyStoppedSeconds = 300)
+        int unhealthyStoppedSeconds = 300,
+        int unhealthyBehindSeconds = 0,
+        StreamId startPosition = default,
+        TimeProvider? clock = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentException.ThrowIfNullOrWhiteSpace(consumer);
 
         var monitor = new StreamPartitionMonitor(
-            topic, consumer, partition, streamKey, unhealthyLagMs, unhealthyBlockSeconds, unhealthyStoppedSeconds);
+            topic,
+            consumer,
+            partition,
+            streamKey,
+            unhealthyLagMs,
+            unhealthyBlockSeconds,
+            unhealthyStoppedSeconds,
+            unhealthyBehindSeconds,
+            startPosition,
+            clock);
 
         return Monitors.AddOrUpdate(monitor.MetricKey, monitor, (_, _) => monitor);
     }
@@ -568,8 +774,13 @@ internal sealed class StreamLagSampler : IAsyncDisposable
                 var last = ParseId(info.LastGeneratedId);
                 var first = info.FirstEntry.IsNull ? StreamId.Min : ParseId(info.FirstEntry.Id);
 
+                // The tail is the last entry that is actually there, not the last id ever generated:
+                // those differ once the newest entry has been deleted or the stream trimmed empty,
+                // and "behind the tail" has to mean there is an entry left to read.
+                monitor.SetTail(info.LastEntry.IsNull ? StreamId.Min : ParseId(info.LastEntry.Id));
+
                 monitor.SetLagEntries(
-                    StreamLag.EstimateEntriesBehind(info.Length, first, last, monitor.LastProcessed));
+                    StreamLag.EstimateEntriesBehind(info.Length, first, last, monitor.Position));
 
                 StreamsDiagnostics.SetLagEntries(monitor.MetricKey, monitor.LagEntries);
             }
@@ -581,6 +792,7 @@ internal sealed class StreamLagSampler : IAsyncDisposable
             {
                 // No such key: the stream has not been written to yet. Nothing behind us, nothing in
                 // it — that is a real answer, not a failure.
+                monitor.SetTail(StreamId.Min);
                 monitor.SetLagEntries(0);
                 StreamsDiagnostics.SetLagEntries(monitor.MetricKey, 0);
                 StreamsDiagnostics.SetStreamLength(monitor.StreamMetricKey, 0);
@@ -589,7 +801,7 @@ internal sealed class StreamLagSampler : IAsyncDisposable
             {
                 this.log?.LogDebug(
                     ex,
-                    "Streams: lag sample failed for topic={Topic} partition={Partition} consumer={Consumer}; streams.lag.entries keeps its previous value until the next sample.",
+                    "Streams: lag sample failed for topic={Topic} partition={Partition} consumer={Consumer}; streams.lag.entries and the sampled tail keep their previous values until the next sample.",
                     monitor.Topic,
                     monitor.Partition,
                     monitor.Consumer);

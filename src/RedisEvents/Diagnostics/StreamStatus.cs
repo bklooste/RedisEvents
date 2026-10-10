@@ -5,9 +5,9 @@ namespace RedisEvents.Diagnostics;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The public face of the per-partition monitors. <c>RedisEvents.Web</c>'s
-/// <c>StreamsHealthCheck</c> reads the monitors directly and grades them for an ASP.NET
-/// <c>/health</c> endpoint; this is for everyone else — a Generic Host worker with no HTTP
+/// The public face of the per-partition monitors. <see cref="StreamHealth"/> grades this snapshot
+/// into one verdict, and <c>RedisEvents.Web</c>'s <c>StreamsHealthCheck</c> reports that verdict on
+/// an ASP.NET <c>/health</c> endpoint; the raw snapshot is for everyone else — a Generic Host worker with no HTTP
 /// surface, a host that wants to stop itself when a partition dies, a custom metric, a diagnostic
 /// endpoint that reports more than one word.
 /// </para>
@@ -51,21 +51,36 @@ public static class StreamStatus
         return snapshot;
     }
 
-    internal static StreamPartitionStatus Snapshot(StreamPartitionMonitor m) => new()
+    internal static StreamPartitionStatus Snapshot(StreamPartitionMonitor m)
     {
-        Topic = m.Topic,
-        Consumer = m.Consumer,
-        Partition = m.Partition,
-        State = (StreamPartitionRunState)(int)m.State,
-        StopReason = m.StopReason,
-        LastProcessed = m.LastProcessed,
-        IsCaughtUp = m.IsCaughtUp,
-        LagMs = m.LagMs,
-        LagEntries = m.LagEntries,
-        BlockedMs = m.BlockedMs,
-        StoppedMs = m.StoppedMs,
-        UnhealthyLagMs = m.UnhealthyLagMs,
-        UnhealthyBlockSeconds = m.UnhealthyBlockSeconds,
-        UnhealthyStoppedSeconds = m.UnhealthyStoppedSeconds,
-    };
+        var progress = m.ReadProgress();
+        var state = (StreamPartitionRunState)(int)m.State;
+
+        return new()
+        {
+            Topic = m.Topic,
+            Consumer = m.Consumer,
+            Partition = m.Partition,
+            State = state,
+            StopReason = m.StopReason,
+            LastProcessed = m.LastProcessed,
+            IsCaughtUp = m.IsCaughtUp,
+            LagMs = m.LagMs,
+            LagEntries = m.LagEntries,
+            BlockedMs = m.BlockedMs,
+            StoppedMs = m.StoppedMs,
+            UnhealthyLagMs = m.UnhealthyLagMs,
+            UnhealthyBlockSeconds = m.UnhealthyBlockSeconds,
+            UnhealthyStoppedSeconds = m.UnhealthyStoppedSeconds,
+            UnhealthyBehindSeconds = m.UnhealthyBehindSeconds,
+            Escalates = state == StreamPartitionRunState.Stopped && m.Escalates,
+            Position = progress.Position,
+            PositionUnchangedMs = progress.PositionUnchangedMs,
+            TailId = progress.Tail,
+            TailSampleAgeMs = progress.TailSampleAgeMs,
+            TailUnchangedMs = progress.TailUnchangedMs,
+            IsBehindTail = progress.IsBehind,
+            BehindMs = progress.BehindMs,
+        };
+    }
 }
