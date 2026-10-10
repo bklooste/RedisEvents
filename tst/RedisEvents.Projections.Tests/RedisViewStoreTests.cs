@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 
 using FluentAssertions;
 
+using RedisEvents.Config;
 using RedisEvents.Projections;
 
 namespace RedisEvents.Tests;
@@ -99,6 +100,74 @@ public sealed class RedisViewStoreTests(RedisStreamsFixture fixture)
             detailList.Add(view);
 
         detailList.Should().ContainSingle().Which.Should().Be(new Detail("a1", "Detail view", 1));
+    }
+
+    /// <summary>The default key shape is unchanged: the entry assembly's name is the owner segment.</summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Default_key_uses_the_entry_assembly_name_as_owner()
+    {
+        var topic = fixture.NewTopic();
+        var store = new RedisViewStore<Detail>(fixture.Db, topic, "detail", RedisViewStoreTestsJson.Default.Detail);
+
+        await store.SetAsync("a1", new Detail("a1", "Widget", 1));
+
+        var expected = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{KeyNamespace.DefaultServiceName()}:detail";
+        (await fixture.Db.HashExistsAsync(expected, "a1")).Should().BeTrue();
+    }
+
+    /// <summary>An explicit owner replaces the assembly name in the key.</summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Explicit_owner_is_used_in_the_key()
+    {
+        var topic = fixture.NewTopic();
+        var store = new RedisViewStore<Detail>(fixture.Db, topic, "detail", RedisViewStoreTestsJson.Default.Detail, "wallet-views");
+
+        await store.SetAsync("a1", new Detail("a1", "Widget", 1));
+
+        var expected = $"{KeyNamespace.Prefix()}{{{topic}}}:view:wallet-views:detail";
+        (await fixture.Db.HashExistsAsync(expected, "a1")).Should().BeTrue();
+        var assemblyKey = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{KeyNamespace.DefaultServiceName()}:detail";
+        (await fixture.Db.KeyExistsAsync(assemblyKey)).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The split-process case: a writer and a separate reader instance sharing an owner agree on the
+    /// key; a store with a different owner sees nothing.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task A_store_written_with_an_owner_is_read_by_another_store_with_the_same_owner_only()
+    {
+        var topic = fixture.NewTopic();
+        var json = RedisViewStoreTestsJson.Default.Detail;
+        var writer = new RedisViewStore<Detail>(fixture.Db, topic, "detail", json, "wallet-views");
+        var reader = new RedisViewStore<Detail>(fixture.Db, topic, "detail", json, "wallet-views");
+        var stranger = new RedisViewStore<Detail>(fixture.Db, topic, "detail", json, "other-owner");
+        var view = new Detail("a1", "Widget", 1);
+
+        await writer.SetAsync("a1", view);
+
+        (await reader.GetAsync("a1")).Should().Be(view);
+        (await stranger.GetAsync("a1")).Should().BeNull();
+
+        var listed = new List<Detail>();
+        await foreach (var v in stranger.ListAsync())
+            listed.Add(v);
+        listed.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    [Trait("TestType", "ServiceTest")]
+    public void A_blank_owner_is_rejected(string? owner)
+    {
+        var act = () => new RedisViewStore<Detail>(fixture.Db, "t", "detail", RedisViewStoreTestsJson.Default.Detail, owner!);
+
+        act.Should().Throw<ArgumentException>();
     }
 }
 

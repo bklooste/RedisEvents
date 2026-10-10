@@ -161,8 +161,23 @@ required the first time a topic is seen by either package on the same builder.
 ## View stores
 
 `IViewStore<TView>` is an optional convenience, not a requirement — a projection may write anywhere it
-likes. `AddRedisViewStore<TView>` stores one Redis **hash per view type** (`{topic}:view:<name>`,
-field = view id, value = JSON), which is fine for up to tens of thousands of small views. Beyond that,
+likes. `AddRedisViewStore<TView>` stores one Redis **hash per view type** (`<env>:re:{topic}:view:<owner>:<name>`,
+field = view id, value = JSON), which is fine for up to tens of thousands of small views. The `<owner>` segment defaults to the entry assembly's name, so
+it is right only while the process that writes a view is the process that reads it. If you split the
+read side into a projection worker (writes) and a query service (reads), or read a view from a test
+host, give both sides the same explicit, stable owner — it is a logical service name, not either
+process's assembly name:
+
+```csharp
+// projection worker and query service alike
+builder.AddRedisViewStore<InventoryDetail>("inventory", "detail", InventoryJsonContext.Default.InventoryDetail,
+                                           owner: "inventory-views");
+// or directly: new RedisViewStore<InventoryDetail>(db, "inventory", "detail", json, owner: "inventory-views")
+```
+
+Different owners are different hashes. Omitting `owner` keeps today's key, so nothing moves.
+
+Beyond that,
 or for any query other than "by id" or "all", implement `IViewStore<TView>` yourself — for example over
 Azure Table Storage:
 

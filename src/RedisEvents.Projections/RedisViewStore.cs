@@ -14,15 +14,24 @@ namespace RedisEvents.Projections;
 /// <remarks>
 /// <para>
 /// <b>Storage shape.</b> All views of one type live in a single hash keyed
-/// <c>&lt;env&gt;:re:{topic}:view:&lt;service&gt;:&lt;viewName&gt;</c> — the same <c>{topic}</c>
+/// <c>&lt;env&gt;:re:{topic}:view:&lt;owner&gt;:&lt;viewName&gt;</c> — the same <c>{topic}</c>
 /// hash-tag brace convention core uses for state keys (see <c>Outbox.StateKey</c>), though a view
 /// does not need to share the topic's hash slot; the prefix is namespacing only. The environment
 /// segment (<see cref="KeyNamespace.Prefix"/>) keeps two environments sharing one Redis apart, and
-/// the service segment (<see cref="KeyNamespace.DefaultServiceName"/>) keeps two services that pick
-/// the same <paramref name="viewName">view name</paramref> under the same topic apart too.
+/// the owner segment keeps two services that pick the same view name under the same topic apart too.
 /// <see cref="GetAsync"/>/<see cref="SetAsync"/>/<see cref="DeleteAsync"/> are <c>HGET</c>/<c>HSET</c>/
 /// <c>HDEL</c> on the view's field; <see cref="ListAsync"/> is <c>HSCAN</c> over the whole hash — one
 /// key to reason about, and listing comes for free.
+/// </para>
+/// <para>
+/// <b>The owner segment.</b> By default it is <see cref="KeyNamespace.DefaultServiceName"/> — the
+/// entry assembly's name — so existing keys do not move. That default is only right when the process
+/// that writes the view is the process that reads it. When a view is written by one process (say a
+/// headless projection worker) and read by another (a query service), or read from a test host, the
+/// entry assemblies differ and so would the keys; the reader would see an empty view. Pass the same
+/// explicit <c>owner</c> to the store on both sides, using a stable logical name for the view's
+/// owning service rather than either process's assembly name. Two stores with different owners are
+/// two different hashes, even for the same topic and view name.
 /// </para>
 /// <para>
 /// <b>Serialisation.</b> Values are UTF-8 JSON bytes produced and consumed entirely through the
@@ -57,17 +66,45 @@ public sealed class RedisViewStore<TView> : IViewStore<TView>
     /// <param name="topic">The topic this view is projected from; used only to namespace the hash key.</param>
     /// <param name="viewName">The view's name, e.g. <c>"detail"</c>; the hash field is the view id.</param>
     /// <param name="typeInfo">The source-generated <see cref="JsonTypeInfo{T}"/> for <typeparamref name="TView"/>.</param>
+    /// <remarks>
+    /// The owner segment of the key is the entry assembly's name (<see cref="KeyNamespace.DefaultServiceName"/>).
+    /// If another process (or a test host) must read what this one writes, use the overload taking an
+    /// explicit <c>owner</c> on both sides.
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="db"/> or <paramref name="typeInfo"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="topic"/> or <paramref name="viewName"/> is null, empty or whitespace.</exception>
     public RedisViewStore(IDatabase db, string topic, string viewName, JsonTypeInfo<TView> typeInfo)
+        : this(db, topic, viewName, typeInfo, KeyNamespace.DefaultServiceName())
+    {
+    }
+
+    /// <summary>
+    /// Creates a store for one view type, backed by a single Redis hash, whose key carries an explicit
+    /// owner name instead of the entry assembly's name.
+    /// </summary>
+    /// <param name="db">The shared streams database — see <c>StreamsConnection.GetSharedDatabase</c>.</param>
+    /// <param name="topic">The topic this view is projected from; used only to namespace the hash key.</param>
+    /// <param name="viewName">The view's name, e.g. <c>"detail"</c>; the hash field is the view id.</param>
+    /// <param name="typeInfo">The source-generated <see cref="JsonTypeInfo{T}"/> for <typeparamref name="TView"/>.</param>
+    /// <param name="owner">
+    /// The logical owner of the view, folded into the key in place of the entry assembly's name. Pass the
+    /// same value from every process that writes or reads this view — a projection worker and the query
+    /// service that serves it, or a test host — and choose a stable name for the owning service, not
+    /// either process's assembly name. Omit it (use the other overload) only when the writer and reader
+    /// are the same entry assembly.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="db"/> or <paramref name="typeInfo"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="topic"/>, <paramref name="viewName"/> or <paramref name="owner"/> is null, empty or whitespace.</exception>
+    public RedisViewStore(IDatabase db, string topic, string viewName, JsonTypeInfo<TView> typeInfo, string owner)
     {
         ArgumentNullException.ThrowIfNull(db);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentException.ThrowIfNullOrWhiteSpace(viewName);
         ArgumentNullException.ThrowIfNull(typeInfo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
 
         this.db = db;
-        this.key = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{KeyNamespace.DefaultServiceName()}:{viewName}";
+        this.key = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{owner}:{viewName}";
         this.typeInfo = typeInfo;
     }
 
