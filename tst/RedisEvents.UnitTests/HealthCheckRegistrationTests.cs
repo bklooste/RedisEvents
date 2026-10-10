@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using RedisEvents.Config;
 using RedisEvents.Consumer;
 using RedisEvents.Extensions;
+using RedisEvents.HealthChecks;
 using RedisEvents.Web;
 using RedisEvents.Wire;
 
@@ -139,5 +140,16 @@ public class HealthCheckRegistrationTests
             _ = ct;
             return ValueTask.CompletedTask;
         }
+    }
+
+    // The reason the check has its own package: a worker must be able to reference it without ASP.NET Core.
+    [Fact]
+    public void the_health_check_assembly_references_nothing_from_aspnetcore()
+    {
+        var assembly = typeof(StreamsHealthCheck).Assembly;
+
+        assembly.GetName().Name.Should().Be("RedisEvents.HealthChecks");
+        assembly.GetReferencedAssemblies().Select(a => a.Name)
+            .Should().NotContain(name => name!.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) || name == "RedisEvents.Web");
     }
 }

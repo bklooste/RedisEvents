@@ -124,6 +124,37 @@ public sealed record ConsumerOptions
     public int UnhealthyBehindSeconds { get; set; }
 
     /// <summary>
+    /// Seconds a consumer may be caught up with its stream and receive nothing before health
+    /// reports Degraded (default: 0, which turns the rule off).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule: every partition of this consumer that this instance is reading is at the tail of
+    /// its stream — a fresh tail sample is not ahead of the position — and none of those positions
+    /// has changed for this long. It is the other half of <see cref="UnhealthyBehindSeconds"/>,
+    /// read off the same clock: a position that has stopped moving either has an entry waiting
+    /// (behind, a consumer fault, Unhealthy) or has none (silent, this rule). Between them no
+    /// frozen position goes ungraded.
+    /// </para>
+    /// <para>
+    /// <b>Degraded, and there is no setting to make it Unhealthy.</b> A consumer with nothing to
+    /// read is working; what is wrong, if anything, is upstream of the stream, or the consumer was
+    /// deployed reading a key nothing writes to. A restart changes neither, so failing the pod on
+    /// silence buys a restart loop for as long as the topic stays quiet, and each restart hands the
+    /// partitions on for nothing. Alert on the Degraded report (rule <c>Silent</c>) instead.
+    /// </para>
+    /// <para>
+    /// <b>All partitions, not any.</b> A keyed topic with a few hot keys routinely leaves one
+    /// partition idle for hours while its siblings are busy; that is traffic shape. Only when every
+    /// partition the instance reads for this consumer is idle is the consumer receiving nothing.
+    /// Off by default because only the service knows whether a quiet topic is normal; set it on the
+    /// consumer of a topic that must be busy. Ignored under <see cref="DeliveryMode.WorkQueue"/>,
+    /// like <see cref="UnhealthyBehindSeconds"/>, and for the same reason.
+    /// </para>
+    /// </remarks>
+    public int DegradedSilenceSeconds { get; set; }
+
+    /// <summary>
     /// Seconds an overlap with another live instance must persist before a
     /// <see cref="InstanceMode.Static"/> consumer stands the partition down (default: 60).
     /// </summary>

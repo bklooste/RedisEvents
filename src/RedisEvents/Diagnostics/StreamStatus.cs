@@ -73,6 +73,7 @@ public static class StreamStatus
             UnhealthyBlockSeconds = m.UnhealthyBlockSeconds,
             UnhealthyStoppedSeconds = m.UnhealthyStoppedSeconds,
             UnhealthyBehindSeconds = m.UnhealthyBehindSeconds,
+            DegradedSilenceSeconds = m.DegradedSilenceSeconds,
             Escalates = state == StreamPartitionRunState.Stopped && m.Escalates,
             Position = progress.Position,
             PositionUnchangedMs = progress.PositionUnchangedMs,

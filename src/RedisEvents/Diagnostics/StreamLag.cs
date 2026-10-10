@@ -105,7 +105,8 @@ internal sealed class StreamPartitionMonitor
         int unhealthyStoppedSeconds = 300,
         int unhealthyBehindSeconds = 0,
         StreamId startPosition = default,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        int degradedSilenceSeconds = 0)
     {
         this.Topic = topic;
         this.Consumer = consumer;
@@ -115,6 +116,7 @@ internal sealed class StreamPartitionMonitor
         this.UnhealthyBlockSeconds = unhealthyBlockSeconds;
         this.UnhealthyStoppedSeconds = unhealthyStoppedSeconds;
         this.UnhealthyBehindSeconds = unhealthyBehindSeconds;
+        this.DegradedSilenceSeconds = degradedSilenceSeconds;
         this.clock = clock ?? TimeProvider.System;
         this.startPosition = startPosition;
         this.notedPosition = startPosition;
@@ -158,6 +160,12 @@ internal sealed class StreamPartitionMonitor
     /// before the health check reports Unhealthy; 0 turns the rule off.
     /// </summary>
     internal int UnhealthyBehindSeconds { get; }
+
+    /// <summary>
+    /// Seconds this partition's consumer may be caught up and receive nothing before the health
+    /// check reports Degraded; 0 turns the rule off.
+    /// </summary>
+    internal int DegradedSilenceSeconds { get; }
 
     /// <summary>
     /// Whether this stop should turn Unhealthy once it has lasted <see cref="UnhealthyStoppedSeconds"/>
@@ -548,7 +556,8 @@ internal static class StreamLag
         int unhealthyStoppedSeconds = 300,
         int unhealthyBehindSeconds = 0,
         StreamId startPosition = default,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        int degradedSilenceSeconds = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentException.ThrowIfNullOrWhiteSpace(consumer);
@@ -563,7 +572,8 @@ internal static class StreamLag
             unhealthyStoppedSeconds,
             unhealthyBehindSeconds,
             startPosition,
-            clock);
+            clock,
+            degradedSilenceSeconds);
 
         return Monitors.AddOrUpdate(monitor.MetricKey, monitor, (_, _) => monitor);
     }

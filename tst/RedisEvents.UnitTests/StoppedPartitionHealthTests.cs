@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using RedisEvents.Diagnostics;
+using RedisEvents.HealthChecks;
 using RedisEvents.Web;
 
 namespace RedisEvents.UnitTests;

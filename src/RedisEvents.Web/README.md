@@ -6,13 +6,14 @@ your service has a web host.
 Why it exists (R-25): the core library
 used to carry `<FrameworkReference Include="Microsoft.AspNetCore.App" />`, so every consumer — including
 a worker with no web host — dragged in the whole ASP.NET Core framework. Core now references hosting,
-logging, configuration and StackExchange.Redis and nothing else; everything that needs ASP.NET or the
-health-check abstractions lives here.
+logging, configuration and StackExchange.Redis and nothing else; everything that needs ASP.NET lives
+here. The stream health check needs only the health-check abstractions, not ASP.NET, so it lives in
+[RedisEvents.HealthChecks](../RedisEvents.HealthChecks/README.md) (namespace `RedisEvents.HealthChecks`),
+where a worker can use it too. This package references it, so a web service needs no extra reference.
 
 | Type | What it is |
 |---|---|
-| `StreamsHealthCheck` | The readiness answer for every stream consumer in the process. Healthy / Degraded / Unhealthy — lag and ownership problems are Degraded on purpose. An adapter: the rules are `StreamHealth` in core, so a worker without this package grades identically. |
-| `StreamsHealthCheckExtensions.AddStreamsHealthCheck()` | Registers the check under the name and tag `streams`. Explicit, because core cannot register it. |
+| `StreamsHealthCheck`, `AddStreamsHealthCheck()` | Moved to `RedisEvents.HealthChecks`; add `using RedisEvents.HealthChecks;`. |
 | `StreamAdminEndpoints.MapRoutes()` | Minimal-API routes for position reset preview/apply and the ownership map. Opt-in; map them behind an admin policy. |
 
 ```csharp

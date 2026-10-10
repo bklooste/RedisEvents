@@ -18,6 +18,7 @@ using RedisEvents.Extensions;
 using RedisEvents.Positions;
 using RedisEvents.Producer;
 using RedisEvents.Wire;
+using RedisEvents.HealthChecks;
 using RedisEvents.Web;
 
 using StackExchange.Redis;

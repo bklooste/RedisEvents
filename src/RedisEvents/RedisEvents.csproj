@@ -41,6 +41,7 @@
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="RedisEvents.Web" />
+		<InternalsVisibleTo Include="RedisEvents.HealthChecks" />
 		<InternalsVisibleTo Include="RedisEvents.UnitTests" />
 		<InternalsVisibleTo Include="RedisEvents.Tests" />
 		<!-- RedisEvents.TestSupport's RedisStreamsFixture drives instances via the internal OwnershipRegistry. -->

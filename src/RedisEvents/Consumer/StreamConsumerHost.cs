@@ -1045,7 +1045,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 this.consumer.UnhealthyBlockSeconds,
                 this.consumer.UnhealthyStoppedSeconds,
                 this.consumer.UnhealthyBehindSeconds,
-                startPosition: from[i]);
+                startPosition: from[i],
+                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1218,7 +1219,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 this.consumer.UnhealthyBlockSeconds,
                 this.consumer.UnhealthyStoppedSeconds,
                 this.consumer.UnhealthyBehindSeconds,
-                startPosition: from[i]);
+                startPosition: from[i],
+                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1432,7 +1434,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             // behind a tail that another member read is normal, and it has no cursor of its own to
             // compare. The behind-the-tail rule is off there whatever the option says.
             useGroup ? 0 : this.consumer.UnhealthyBehindSeconds,
-            startPosition: from);
+            startPosition: from,
+            degradedSilenceSeconds: useGroup ? 0 : this.consumer.DegradedSilenceSeconds);
 
         this.monitors.Add(monitor);
 

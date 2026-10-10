@@ -105,6 +105,12 @@ public readonly record struct StreamPartitionStatus
     public int UnhealthyBehindSeconds { get; init; }
 
     /// <summary>
+    /// This consumer's <c>ConsumerOptions.DegradedSilenceSeconds</c>; 0 means the silence rule is
+    /// off for it.
+    /// </summary>
+    public int DegradedSilenceSeconds { get; init; }
+
+    /// <summary>
     /// Whether a <see cref="StreamPartitionRunState.Stopped"/> partition's stop turns Unhealthy once
     /// it has lasted <see cref="UnhealthyStoppedSeconds"/> with entries waiting.
     /// </summary>

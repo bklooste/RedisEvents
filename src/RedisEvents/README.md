@@ -757,10 +757,11 @@ return map.Unowned;
 ## Health: one set of rules, two hosts
 
 `StreamHealth` grades every partition this process reads into Healthy, Degraded or Unhealthy. It
-lives in core, so both kinds of host run the same rules: `RedisEvents.Web`'s `StreamsHealthCheck` is
-an adapter that turns its report into a `HealthCheckResult` for `/health`, and a Generic Host worker
-— which cannot reference that package without taking the ASP.NET Core framework with it — calls it
-directly:
+lives in core, so both kinds of host run the same rules. `RedisEvents.HealthChecks`' `StreamsHealthCheck`
+is an adapter that turns its report into a `HealthCheckResult`; that package has no ASP.NET Core
+dependency, so a web service maps the check to `/health` and a Generic Host worker registers the same
+check and acts on it through an `IHealthCheckPublisher`. A host that wants no health-check
+abstractions at all calls the rules directly:
 
 ```csharp
 var report = StreamHealth.Evaluate(services);   // partitions + consumer hosts + the shared connection
@@ -780,7 +781,35 @@ worker wraps this in an `IHealthCheck`, map `StreamHealthStatus` to `HealthStatu
 | Verdict | When |
 |---|---|
 | **Unhealthy** | The Redis connection is down · a partition blocked past `UnhealthyBlockSeconds` · a partition whose stop `Escalates`, stopped past `UnhealthyStoppedSeconds` with entries waiting · a partition **behind the tail with a frozen position** past `UnhealthyBehindSeconds` (off by default) · no registered consumer started · every partition stopped |
-| **Degraded** | Nothing has started reading yet · a partition blocked or stopped inside its threshold, or stopped by `ErrorPolicy` · lag past `UnhealthyLagMs` · an ownership gap or overlap |
+| **Degraded** | Nothing has started reading yet · a partition blocked or stopped inside its threshold, or stopped by `ErrorPolicy` · lag past `UnhealthyLagMs` · an ownership gap or overlap · a consumer caught up and receiving nothing past `DegradedSilenceSeconds` (off by default) |
+
+### A frozen position: one clock, two meanings
+
+A position that has stopped moving is one of two things, and the tail of the stream says which.
+
+| The tail is… | So… | Setting | Verdict |
+|---|---|---|---|
+| ahead of the position | an entry is waiting and the consumer is not reading it | `UnhealthyBehindSeconds` | **Unhealthy**: a restart hands the partition to something that will |
+| not ahead | there is nothing to read | `DegradedSilenceSeconds` | **Degraded**: the consumer is working |
+
+```json
+"Streams": { "Consumers": [ { "Topic": "feed_odds", "UnhealthyBehindSeconds": 300, "DegradedSilenceSeconds": 600 } ] }
+```
+
+**Silence has no Unhealthy setting, on purpose.** A caught-up consumer with nothing to read is not
+at fault: either the topic is quiet, or its producer is broken, or the consumer was deployed reading
+a key nothing writes to. A restart changes none of the three, so failing the pod on silence is a
+restart loop for exactly as long as the topic stays quiet, and every restart hands partitions on for
+nothing. Alert on the Degraded report (`report.Rule == StreamHealthRule.Silent`) and fix the producer.
+
+- **Per consumer, all partitions.** Silence is judged over every partition of the consumer that this
+  instance is reading. One idle partition beside busy siblings is traffic shape, not silence.
+- **Off by default**, because only the service knows whether a quiet topic is normal. Set it on the
+  consumer of a topic that must be busy, and leave it off the others.
+- A tail that was never sampled, or whose sample is over 60 seconds old, is unknown, and unknown is
+  not silent. A partition that is starting, blocked or stopped answers to its own rule.
+- `StreamHealth.FindSilent(partitions)` returns the silent consumer for a host that wants the fact
+  without the grading.
 
 ### Why lag never restarts a consumer, and what does
 
