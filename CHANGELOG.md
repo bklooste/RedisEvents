@@ -4,6 +4,18 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-10
+
+### Added
+
+- **`RedisViewStore<TView>` and `AddRedisViewStore<TView>` take an optional explicit `owner`.** The
+  view's Redis key is `<env>:re:{topic}:view:<owner>:<viewName>`, and `<owner>` was always the entry
+  assembly's name with no override — so a view written by one process (a projection worker) and read by
+  another (a query service, or a test host) resolved to two different keys and the reader saw nothing.
+  Pass the same stable logical owner to both sides via the new constructor / `AddRedisViewStore`
+  overload (`ArgumentException.ThrowIfNullOrWhiteSpace` applies). The existing overloads are unchanged
+  and still default to the entry assembly's name, so no existing key moves.
+
 ## 2026-10-04
 
 ### Changed — breaking (config)

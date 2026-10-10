@@ -4,6 +4,10 @@ using RedisEvents.Projections;
 // The read side of the two-service Inventory sample: an event projector consuming the same topic
 // the command side (RedisEvents.EventSourcing.Sample.Inventory.CommandApi) writes to, a Redis-backed
 // view store, and one query endpoint — the whole read side of the package README's quickstart.
+//
+// The projector that writes the view and the endpoint that reads it live in this one process, so the
+// view store's default key owner (the entry assembly name) agrees on both sides. If you split them
+// into a worker and a query service, pass the same explicit owner to AddRedisViewStore in both.
 var builder = WebApplication.CreateBuilder(args);
 builder.AddEventProjector("inventory", InventoryEventTypes.Register)
        .AddRedisViewStore<InventoryDetail>("inventory", "detail", InventoryJsonContext.Default.InventoryDetail)

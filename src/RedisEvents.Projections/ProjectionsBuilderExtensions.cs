@@ -326,6 +326,10 @@ public static class ProjectionsBuilderExtensions
     /// <param name="viewName">Distinguishes this view from others stored under the same topic.</param>
     /// <param name="json">Source-generated metadata for <typeparamref name="TView"/>.</param>
     /// <returns>The builder, for chaining.</returns>
+    /// <remarks>
+    /// The view's key carries the entry assembly's name as its owner. If another process must read
+    /// this view, use the overload taking an explicit <c>owner</c> on both sides.
+    /// </remarks>
     public static IHostApplicationBuilder AddRedisViewStore<TView>(
         this IHostApplicationBuilder builder,
         string topic,
@@ -343,6 +347,49 @@ public static class ProjectionsBuilderExtensions
             topic,
             viewName,
             json));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Registers a Redis-backed <see cref="IViewStore{TView}"/> like
+    /// <see cref="AddRedisViewStore{TView}(IHostApplicationBuilder, string, string, JsonTypeInfo{TView})"/>,
+    /// but with an explicit owner name in the view's key instead of the entry assembly's name.
+    /// </summary>
+    /// <typeparam name="TView">The view type.</typeparam>
+    /// <param name="builder">The host application builder.</param>
+    /// <param name="topic">See the overload without <c>owner</c>.</param>
+    /// <param name="viewName">Distinguishes this view from others stored under the same topic.</param>
+    /// <param name="json">Source-generated metadata for <typeparamref name="TView"/>.</param>
+    /// <param name="owner">
+    /// The logical owner of the view. A view written by one process and read by another (a projection
+    /// worker and a query service) must be registered with the same owner on both sides; use a stable
+    /// name for the owning service, not either process's assembly name. The default (the other
+    /// overload) is the entry assembly's name, which only works when writer and reader are the same
+    /// assembly.
+    /// </param>
+    /// <returns>The builder, for chaining.</returns>
+    /// <exception cref="ArgumentException"><paramref name="owner"/> is null, empty or whitespace.</exception>
+    public static IHostApplicationBuilder AddRedisViewStore<TView>(
+        this IHostApplicationBuilder builder,
+        string topic,
+        string viewName,
+        JsonTypeInfo<TView> json,
+        string owner)
+        where TView : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(topic);
+        ArgumentException.ThrowIfNullOrWhiteSpace(viewName);
+        ArgumentNullException.ThrowIfNull(json);
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+
+        builder.Services.AddSingleton<IViewStore<TView>>(sp => new RedisViewStore<TView>(
+            StreamsConnection.GetSharedDatabase(sp),
+            topic,
+            viewName,
+            json,
+            owner));
 
         return builder;
     }
