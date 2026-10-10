@@ -11,7 +11,7 @@ health-check abstractions lives here.
 
 | Type | What it is |
 |---|---|
-| `StreamsHealthCheck` | The readiness answer for every stream consumer in the process. Healthy / Degraded / Unhealthy — lag and ownership problems are Degraded on purpose. |
+| `StreamsHealthCheck` | The readiness answer for every stream consumer in the process. Healthy / Degraded / Unhealthy — lag and ownership problems are Degraded on purpose. An adapter: the rules are `StreamHealth` in core, so a worker without this package grades identically. |
 | `StreamsHealthCheckExtensions.AddStreamsHealthCheck()` | Registers the check under the name and tag `streams`. Explicit, because core cannot register it. |
 | `StreamAdminEndpoints.MapRoutes()` | Minimal-API routes for position reset preview/apply and the ownership map. Opt-in; map them behind an admin policy. |
 
@@ -25,6 +25,10 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c
 var admin = app.MapGroup("/admin/streams").RequireAuthorization("admin");
 StreamAdminEndpoints.MapRoutes(admin, app.Services.GetRequiredService<IConnectionMultiplexer>());
 ```
+
+The rules, including the opt-in `UnhealthyBehindSeconds` ("behind the tail with a frozen position" —
+the one that is safe to restart on, where `UnhealthyLagMs` is not), are documented once, under
+[Health: one set of rules, two hosts](../RedisEvents/README.md#health-one-set-of-rules-two-hosts).
 
 `library/tst/RedisEvents.HeadlessSmoke` is the regression guard for the split: a worker that
 references core alone, and fails at startup if any ASP.NET assembly reaches its dependency closure.
