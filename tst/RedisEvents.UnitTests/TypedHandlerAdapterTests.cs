@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
 using FluentAssertions;
@@ -97,6 +98,66 @@ public class TypedHandlerAdapterTests
     {
         var body = JsonSerializer.SerializeToUtf8Bytes(order, TypedPublishJson.Default.TypedOrder);
         return new StreamMsg(body, typeof(TypedOrder).FullName!, new StreamId(id, 0), 0, "k", string.Empty, null, HeaderBlock.Empty);
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task Message_adapter_warns_when_a_body_decodes_to_null_and_still_calls_the_handler()
+    {
+        var recorder = new RecordingMessageHandler();
+        var log = new CapturingLog();
+        var adapter = new TypedMessageHandlerAdapter<TypedOrder>(recorder, TypedPublishJson.Default.TypedOrder);
+        adapter.Attach(log, "orders", "billing");
+        var msg = new StreamMsg("null"u8.ToArray(), "Orders.TypedOrder", new StreamId(7, 3), 2, "k", string.Empty, null, HeaderBlock.Empty);
+
+        await adapter.HandleAsync(in msg, CancellationToken.None);
+
+        recorder.Seen.Should().ContainSingle().Which.Value.Should().BeNull();
+        var warning = log.At(LogLevel.Warning).Should().ContainSingle().Subject;
+        warning.Should().Contain("topic=orders").And.Contain("consumer=billing").And.Contain("partition=2")
+            .And.Contain("ids=7-3..7-3").And.Contain("type=Orders.TypedOrder").And.Contain("1 of 1");
+    }
+
+    [Theory]
+    [Trait("TestType", "UnitTest")]
+    [InlineData(5)]                                                     // sequential path
+    [InlineData(TypedBatchHandlerAdapter<TypedOrder>.ChunkSize * 3)]    // chunked parallel path
+    public async Task Batch_adapter_logs_one_warning_per_batch_for_bodies_that_decode_to_null(int count)
+    {
+        var recorder = new RecordingBatchHandler();
+        var log = new CapturingLog();
+        var adapter = new TypedBatchHandlerAdapter<TypedOrder>(recorder, TypedPublishJson.Default.TypedOrder);
+        adapter.Attach(log, "orders", "billing");
+        var batch = new StreamMsg[count];
+        for (var i = 0; i < count; i++)
+        {
+            var body = i is 1 or 3
+                ? "null"u8.ToArray()
+                : JsonSerializer.SerializeToUtf8Bytes(new TypedOrder(i, "o"), TypedPublishJson.Default.TypedOrder);
+            batch[i] = new StreamMsg(body, "Orders.TypedOrder", new StreamId(10, i), 0, "k", string.Empty, null, HeaderBlock.Empty);
+        }
+
+        await adapter.HandleAsync(batch, CancellationToken.None);
+
+        recorder.Seen.Should().ContainSingle().Which.Length.Should().Be(count, "the handler still sees every message");
+        var warning = log.At(LogLevel.Warning).Should().ContainSingle().Subject;
+        warning.Should().Contain($"2 of {count}").And.Contain("topic=orders").And.Contain("consumer=billing")
+            .And.Contain("ids=10-1..10-3").And.Contain("type=Orders.TypedOrder");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task Batch_adapter_logs_nothing_when_every_body_decodes()
+    {
+        var log = new CapturingLog();
+        var adapter = new TypedBatchHandlerAdapter<TypedOrder>(new RecordingBatchHandler(), TypedPublishJson.Default.TypedOrder);
+        adapter.Attach(log, "orders", "billing");
+        var body = JsonSerializer.SerializeToUtf8Bytes(new TypedOrder(1, "o"), TypedPublishJson.Default.TypedOrder);
+        var batch = new[] { new StreamMsg(body, "T", new StreamId(1, 0), 0, "k", string.Empty, null, HeaderBlock.Empty) };
+
+        await adapter.HandleAsync(batch, CancellationToken.None);
+
+        log.Entries.Should().BeEmpty();
     }
 
     private sealed class RecordingMessageHandler : IMessageHandler<TypedOrder>

@@ -218,7 +218,8 @@ public static class ProjectionsBuilderExtensions
         builder.Services.AddKeyedSingleton(topic, (sp, _) => new EventProjector(
             sp.GetRequiredKeyedService<EventTypeRegistry>(topic),
             [.. projectionTypes.Types.Select(sp.GetRequiredService), .. projectionFactories.Factories.Select(f => f(sp))],
-            sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents.Projections")));
+            sp.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents.Projections"),
+            topic));
 
         return builder;
     }
