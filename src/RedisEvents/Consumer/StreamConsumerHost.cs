@@ -271,6 +271,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         if (registration.WrapAsTypedHandler is { } wrap)
         {
             instance = wrap(instance);
+            if (instance is ITypedHandlerAdapter typed)
+            {
+                typed.Attach(
+                    services.GetService<ILoggerFactory>()?.CreateLogger("RedisEvents.Consumer") ?? NullLogger.Instance,
+                    registration.Options.Topic ?? string.Empty,
+                    registration.Consumer);
+            }
         }
 
         return instance switch

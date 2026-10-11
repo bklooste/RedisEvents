@@ -165,6 +165,41 @@ public class EventProjectorTests
         await act.Should().ThrowAsync<TestDontIgnoreException>().WithMessage("blocked");
     }
 
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task An_unregistered_wire_type_is_logged_at_Warning_once_with_its_topic_and_id_then_at_Debug()
+    {
+        var registry = new EventTypeRegistry().RegisterJson("event.a", EventProjectorTestsJson.Default.EventA);
+        var log = new ListLogger();
+        var projector = new EventProjector(registry, [new SpyProjection()], log, "orders");
+
+        var first = Build(SampleA, "event.unknown", partitionKey: "agg-1", correlationId: "c", id: new StreamId(5, 1));
+        var second = Build(SampleA, "event.unknown", partitionKey: "agg-2", correlationId: "c", id: new StreamId(5, 2));
+        var other = Build(SampleA, "event.other", partitionKey: "agg-3", correlationId: "c", id: new StreamId(5, 3));
+
+        await projector.HandleAsync(new[] { first, second, other }, CancellationToken.None);
+
+        var warnings = log.Entries.Where(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning).Select(e => e.Message).ToArray();
+        warnings.Should().HaveCount(2, "one per distinct unknown wire type, not one per message");
+        warnings[0].Should().Contain("'event.unknown'").And.Contain("topic=orders").And.Contain("id=5-1").And.Contain("partitionKey=agg-1");
+        warnings[1].Should().Contain("'event.other'").And.Contain("id=5-3");
+        log.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Debug)
+            .Which.Message.Should().Contain("'event.unknown'").And.Contain("id=5-2");
+    }
+
+    private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        internal List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => this.Entries.Add((logLevel, formatter(state, exception)));
+    }
+
     private static StreamMsg Build<T>(T message, string wireType, string partitionKey, string correlationId, StreamId id, HeaderBlock headers = default)
         where T : notnull
         => new(

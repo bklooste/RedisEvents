@@ -59,6 +59,8 @@ public sealed class EventProjector : IBatchHandler
     private readonly EventTypeRegistry types;
     private readonly IReadOnlyList<object> projections;
     private readonly ILogger? logger;
+    private readonly string topic;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> warnedUnknownTypes = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Creates a projector that dispatches through <paramref name="types"/> to <paramref name="projections"/>.
@@ -72,8 +74,9 @@ public sealed class EventProjector : IBatchHandler
     /// instance may implement <see cref="IProjection{TEvent}"/> for several event types, and several
     /// instances may all bind to the same event type — every match is invoked.
     /// </param>
-    /// <param name="logger">Optional logger for the Debug-level skip notices. May be <see langword="null"/>.</param>
-    public EventProjector(EventTypeRegistry types, IReadOnlyList<object> projections, ILogger? logger = null)
+    /// <param name="logger">Optional logger for the skip notices: Warning the first time an unknown wire type is met, Debug after. May be <see langword="null"/>.</param>
+    /// <param name="topic">The topic this projector consumes, named in the skip notices. May be <see langword="null"/>.</param>
+    public EventProjector(EventTypeRegistry types, IReadOnlyList<object> projections, ILogger? logger = null, string? topic = null)
     {
         ArgumentNullException.ThrowIfNull(types);
         ArgumentNullException.ThrowIfNull(projections);
@@ -81,6 +84,7 @@ public sealed class EventProjector : IBatchHandler
         this.types = types;
         this.projections = projections;
         this.logger = logger;
+        this.topic = topic ?? "(unknown)";
     }
 
     /// <inheritdoc />
@@ -92,9 +96,23 @@ public sealed class EventProjector : IBatchHandler
 
             if (!types.TryDecode(msg.Type, msg.Body, out var @event))
             {
-                logger?.LogDebug(
-                    "EventProjector: skipping event of unknown wire type '{WireType}' — no EventTypeRegistry registration for it.",
-                    msg.Type);
+                // Warning the first time a wire type is met and Debug after that: a topic may carry types this
+                // projector does not want, so every skip at Warning would flood, and none at all hides a renamed tag.
+                if (this.warnedUnknownTypes.TryAdd(msg.Type, 0))
+                {
+                    logger?.LogWarning(
+                        "EventProjector: skipping events of unknown wire type '{WireType}' on topic={Topic} — no EventTypeRegistry registration for it. " +
+                        "First seen at partition={Partition} id={Id} partitionKey={PartitionKey}; further events of this type are skipped at Debug. " +
+                        "If this projector should handle the type, the producer's wire tag and the registration disagree.",
+                        msg.Type, this.topic, msg.Partition, msg.Id.Format(), msg.PartitionKey);
+                }
+                else
+                {
+                    logger?.LogDebug(
+                        "EventProjector: skipping event of unknown wire type '{WireType}' on topic={Topic} id={Id} — no EventTypeRegistry registration for it.",
+                        msg.Type, this.topic, msg.Id.Format());
+                }
+
                 continue;
             }
 

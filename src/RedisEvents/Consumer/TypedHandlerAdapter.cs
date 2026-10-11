@@ -1,9 +1,35 @@
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
+using Microsoft.Extensions.Logging;
 using RedisEvents.Wire;
 
 namespace RedisEvents.Consumer;
+
+/// <summary>
+/// What the consumer host tells a typed adapter about where it sits, so a body that decodes to
+/// <see langword="null"/> is reported with its topic and consumer and not handed on in silence.
+/// </summary>
+internal interface ITypedHandlerAdapter
+{
+    /// <summary>Names the stream this adapter decodes for and gives it a logger.</summary>
+    /// <param name="log">The consumer's logger.</param>
+    /// <param name="topic">The topic consumed.</param>
+    /// <param name="consumer">The consumer name.</param>
+    void Attach(ILogger log, string topic, string consumer);
+}
+
+/// <summary>The one Warning both typed adapters log for bodies that decoded to <see langword="null"/>.</summary>
+internal static class NullDecodeLog
+{
+    internal static void Warn(ILogger? log, string topic, string consumer, Type messageType, int nullCount, int count, in StreamMsg first, in StreamMsg last)
+    {
+        log?.LogWarning(
+            "Streams: {NullCount} of {Count} message bodies decoded to null {MessageClrType} for topic={Topic} partition={Partition} consumer={Consumer} ids={FirstId}..{LastId} type={MessageType}. " +
+            "The handler is still called and sees Value == null for them; a deserializer that returns null (JSON literal null, or a decoder that swallows its own failure) hides a bad message.",
+            nullCount, count, messageType.Name, topic, first.Partition, consumer, first.Id.Format(), last.Id.Format(), first.Type);
+    }
+}
 
 /// <summary>
 /// Wraps a typed handler (<see cref="IMessageHandler{T}"/> / <see cref="IBatchHandler{T}"/>) into the
@@ -18,8 +44,12 @@ namespace RedisEvents.Consumer;
 /// changes here. The <see cref="JsonTypeInfo{T}"/> constructor is the JSON-specific convenience kept
 /// for the existing typed-publish-and-consume overloads and their tests.
 /// </remarks>
-internal sealed class TypedMessageHandlerAdapter<T> : IMessageHandler
+internal sealed class TypedMessageHandlerAdapter<T> : IMessageHandler, ITypedHandlerAdapter
 {
+    private ILogger? log;
+    private string topic = string.Empty;
+    private string consumer = string.Empty;
+
     private readonly IMessageHandler<T> inner;
     private readonly Func<ReadOnlyMemory<byte>, T?> deserialize;
 
@@ -37,7 +67,20 @@ internal sealed class TypedMessageHandlerAdapter<T> : IMessageHandler
     public ValueTask HandleAsync(in StreamMsg msg, CancellationToken ct)
     {
         var typed = new StreamMsg<T>(this.deserialize(msg.Body), msg);
+        if (typed.Value is null)
+        {
+            NullDecodeLog.Warn(this.log, this.topic, this.consumer, typeof(T), 1, 1, in msg, in msg);
+        }
+
         return this.inner.HandleAsync(in typed, ct);
+    }
+
+    /// <inheritdoc />
+    public void Attach(ILogger log, string topic, string consumer)
+    {
+        this.log = log;
+        this.topic = topic;
+        this.consumer = consumer;
     }
 }
 
@@ -58,10 +101,14 @@ internal sealed class TypedMessageHandlerAdapter<T> : IMessageHandler
 /// spreading deserialisation across cores is worth it.
 /// </para>
 /// </remarks>
-internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler
+internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler, ITypedHandlerAdapter
 {
     /// <summary>The parallel/sequential cutover point, and the chunk size once parallel.</summary>
     internal const int ChunkSize = 10;
+
+    private ILogger? log;
+    private string topic = string.Empty;
+    private string consumer = string.Empty;
 
     private readonly IBatchHandler<T> inner;
     private readonly Func<ReadOnlyMemory<byte>, T?> deserialize;
@@ -83,7 +130,40 @@ internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler
             ? this.DeserializeSequential(batch)
             : this.DeserializeChunkedParallel(batch);
 
+        this.WarnOnNulls(batch, typed);
+
         await this.inner.HandleAsync(typed, ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public void Attach(ILogger log, string topic, string consumer)
+    {
+        this.log = log;
+        this.topic = topic;
+        this.consumer = consumer;
+    }
+
+    // One line per batch, never one per message: a topic of null bodies must not flood the log.
+    private void WarnOnNulls(ReadOnlyMemory<StreamMsg> batch, StreamMsg<T>[] typed)
+    {
+        var nulls = 0;
+        var first = -1;
+        var last = -1;
+        for (var i = 0; i < typed.Length; i++)
+        {
+            if (typed[i].Value is null)
+            {
+                nulls++;
+                first = first < 0 ? i : first;
+                last = i;
+            }
+        }
+
+        if (nulls > 0)
+        {
+            var span = batch.Span;
+            NullDecodeLog.Warn(this.log, this.topic, this.consumer, typeof(T), nulls, typed.Length, in span[first], in span[last]);
+        }
     }
 
     private StreamMsg<T>[] DeserializeSequential(ReadOnlyMemory<StreamMsg> batch)
