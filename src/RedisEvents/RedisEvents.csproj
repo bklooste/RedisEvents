@@ -51,6 +51,9 @@
 		<!-- EventRepositoryTests/EventSourcingEndToEndTests/EventSourcingPerfBenchmarkTests reach
 		     StreamKeys/StreamStore/EntryCodec/RedisPositionStore directly. -->
 		<InternalsVisibleTo Include="RedisEvents.EventSourcing.Tests" />
+		<!-- BatchProjectionEndToEndTests reads positions through RedisPositionStore and shortens the
+		     blocking-retry backoff through PartitionWorker.BlockDelay, as ErrorServiceTests does. -->
+		<InternalsVisibleTo Include="RedisEvents.Projections.Tests" />
 		<!--
 		  R-23: the headless guard asserts the container built exactly one StreamConsumerHost, which
 		  is internal wiring after the public-surface trim. It is a test project, not a consumer.

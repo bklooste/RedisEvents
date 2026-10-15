@@ -4,6 +4,28 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-15
+
+### Added
+
+- **`IBatchProjection`: a projection can write once per batch instead of once per event**
+  (`RedisEvents.Projections`). Its `HandleAsync` buffers into the new `EventMeta.Batch`, a
+  `ProjectionBatch` scope shared by every event of one projector call, and `FlushAsync(batch, ct)` runs
+  once after the batch's last event, inside `EventProjector.HandleAsync`, so before core can record the
+  position. The scope is per call, not per projection, because a projection is a singleton shared by
+  every topic and partition; it is closed when the projector returns.
+  - **A flush that throws is a batch that threw.** A `DontIgnoreException` blocks and redelivers the
+    whole batch; any other exception skips it. When one flush fails ordinarily the other batch
+    projections are still flushed.
+  - **An event that fails ordinarily flushes first, then rethrows**, so a skipped batch does not drop
+    the earlier events' buffered work (per-event projections had already written it). If that flush
+    throws a `DontIgnoreException`, the batch blocks instead of skipping.
+  - Projections that do not implement it are unchanged. Each flush has a `projections.flush <Type>` span.
+  - **Why.** The per-event projector caps a remote store at one round trip per event per partition; a
+    table-storage history projection fell behind a 137-events-per-second feed at about 8 ms a write.
+    Buffering in the projection was not safe without this hook: rows held past `HandleAsync` are lost
+    if the position advances before they are written.
+
 ## 2026-10-11
 
 ### Changed (breaking)

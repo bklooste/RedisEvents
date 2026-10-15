@@ -74,6 +74,38 @@ internal static class ProjectionsSpans
     /// </summary>
     /// <param name="activity">The span, if there is one.</param>
     /// <param name="ex">The failure.</param>
+    /// <summary>The flush span's name prefix; the projection's type name is appended.</summary>
+    private const string FlushSpanName = "projections.flush";
+
+    /// <summary>Tag: the topic the flushed batch was read from.</summary>
+    internal const string TopicTagKey = "projections.topic";
+
+    /// <summary>Tag: the partition the flushed batch was read from.</summary>
+    internal const string PartitionTagKey = "projections.partition";
+
+    /// <summary>
+    /// Starts the span around one <see cref="IBatchProjection.FlushAsync"/> call: one per flushed
+    /// projection per batch, nested under core's <c>streams.process</c> span for the batch.
+    /// </summary>
+    /// <param name="projection">The flushed projection's type name.</param>
+    /// <param name="topic">The batch's topic.</param>
+    /// <param name="partition">The batch's partition.</param>
+    /// <returns>The started activity, or <see langword="null"/> when nobody is listening.</returns>
+    internal static Activity? StartFlush(string projection, string topic, int partition)
+    {
+        var activity = ProjectionsDiagnostics.Source.StartActivity(
+            $"{FlushSpanName} {projection}",
+            ActivityKind.Internal);
+
+        if (activity is { IsAllDataRequested: true })
+        {
+            activity.SetTag(TopicTagKey, topic);
+            activity.SetTag(PartitionTagKey, partition);
+        }
+
+        return activity;
+    }
+
     internal static void Failed(Activity? activity, Exception ex)
     {
         ArgumentNullException.ThrowIfNull(ex);

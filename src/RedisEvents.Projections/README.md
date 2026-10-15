@@ -219,12 +219,63 @@ side at all. A topic is partitioned by key, so every event sharing one `Id`-orde
 arrives at one projector instance in publish order; nothing extra is needed to make that comparison
 meaningful.
 
+## Writing once per batch
+
+A projection writes per event by default: one store round trip per event, in batch order, per
+partition. Against a remote store that round trip caps throughput (a few milliseconds per event is a
+few hundred events a second per partition). A projection that can group work, such as table-storage
+rows that share a partition key and go in one transaction, opts in to `IBatchProjection`:
+
+```csharp
+public sealed class LedgerProjection(LedgerStore store) : IProjection<Posted>, IBatchProjection
+{
+    public ValueTask HandleAsync(Posted e, EventMeta meta, CancellationToken ct)
+    {
+        // Buffer in the batch scope, never in a field: this instance is shared by every partition.
+        meta.Batch!.GetOrAdd(this, () => new List<LedgerRow>()).Add(LedgerRow.From(e, meta.Id));
+        return ValueTask.CompletedTask;
+    }
+
+    public async ValueTask FlushAsync(ProjectionBatch batch, CancellationToken ct)
+    {
+        if (batch.TryGet<List<LedgerRow>>(this, out var rows))
+        {
+            await store.UpsertGroupedAsync(rows, ct);   // idempotent: a retried batch rewrites the same rows
+        }
+    }
+}
+```
+
+What the projector guarantees:
+
+- **The flush runs before the position can move.** After the batch's last event is dispatched,
+  `FlushAsync` runs once for each batch projection that was handed an event, still inside the
+  projector's `HandleAsync`. Core records a position only after that returns.
+- **A flush that throws is a batch that threw.** A `DontIgnoreException` subclass blocks the partition
+  and redelivers the whole batch, which is dispatched into a new scope and flushed again; any other
+  exception is logged and the batch is skipped. So a flush must be idempotent across a retried batch.
+  When one batch projection's flush throws an ordinary exception, the others are still flushed (the
+  skip passes their work too) and the first exception is rethrown.
+- **An event that throws an ordinary exception flushes first.** The batch is about to be skipped, and
+  per-event projections have already written the events before the failing one, so the projector
+  flushes the batch projections, then rethrows. If that flush throws a `DontIgnoreException`, that is
+  thrown instead: the batch blocks rather than advancing past rows that were never written. An event
+  that throws a `DontIgnoreException`, or shutdown, flushes nothing: the batch redelivers from its start.
+- **Nothing outlives the batch.** The `ProjectionBatch` is closed when the projector returns; using a
+  kept reference throws.
+- **Projections that do not opt in are unchanged.** They are dispatched per event exactly as before.
+
+Under `PersistMode.SyncMessage` core hands the projector one message at a time, so the flush runs per
+event. `EventMeta.Batch` is `null` only when a test calls `HandleAsync` itself; construct a
+`ProjectionBatch` and pass it with `meta with { Batch = batch }` to drive a batch projection directly.
+
 ## Error handling
 
 The projector has no error policy of its own; it has core's. Per event, in batch order: an unknown
 wire type or a known type with no projection bound to it is skipped at `Debug`; a decode failure always
 throws; a projection that throws propagates unchanged and immediately, and the rest of the batch is not
-processed. From there it is exactly
+processed (batch projections are flushed first when the exception is an ordinary one; see
+[Writing once per batch](#writing-once-per-batch)). From there it is exactly
 [core's error contract](../RedisEvents/README.md#the-error-contract): an ordinary exception logs the
 batch and advances past it, and a `DontIgnoreException` subclass blocks the partition and retries with
 backoff while every other partition keeps running.

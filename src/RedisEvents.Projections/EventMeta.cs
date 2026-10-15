@@ -17,7 +17,8 @@ namespace RedisEvents.Projections;
 /// <see cref="EventTypeRegistry.TryDecode"/>, so there is nothing left for it to do with
 /// <c>StreamMsg.Body</c> except misuse the pooled buffer that memory aliases — <see cref="EventMeta"/>
 /// carries forward only the facts a projection actually needs (<see cref="PartitionKey"/>,
-/// <see cref="Id"/>, <see cref="CorrelationId"/>) and nothing that outlives the batch.
+/// <see cref="Id"/>, <see cref="CorrelationId"/>, and the batch scope <see cref="Batch"/>) and
+/// nothing that outlives the batch.
 /// </para>
 /// <para>
 /// <b>No aggregate version here, by design.</b> The read side depends only on standard RedisEvents
@@ -45,4 +46,15 @@ namespace RedisEvents.Projections;
 /// for a projection — see the remarks above.
 /// </param>
 /// <param name="CorrelationId">The publisher's correlation id, or empty when none was set.</param>
-public readonly record struct EventMeta(string PartitionKey, RedisEvents.Wire.StreamId Id, string CorrelationId);
+public readonly record struct EventMeta(string PartitionKey, RedisEvents.Wire.StreamId Id, string CorrelationId)
+{
+    /// <summary>
+    /// The batch this event was dispatched in: where an <see cref="IBatchProjection"/> buffers work
+    /// that its <see cref="IBatchProjection.FlushAsync"/> writes once the batch's last event has been
+    /// dispatched. Set on every event an <see cref="EventProjector"/> dispatches, the same instance for
+    /// every event of one batch; <see langword="null"/> only when a caller builds the meta itself, as a
+    /// unit test calling <c>HandleAsync</c> directly does. A projection that does not implement
+    /// <see cref="IBatchProjection"/> can ignore it.
+    /// </summary>
+    public ProjectionBatch? Batch { get; init; }
+}
