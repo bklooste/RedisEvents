@@ -628,10 +628,8 @@ public static class StreamsBuilderExtensions
         {
             // The buffered publisher owns a direct one internally: encode, route and trim live in
             // StreamPublisher alone, and the buffer adds nothing but batching.
-            // object? not object: the keyed-factory delegate declares a nullable key. (It reads as
-            // non-nullable through the ASP.NET shared framework's ref assemblies, which is what core
-            // used to compile against before the R-25 split; object? is correct against both.)
-            builder.Services.AddKeyedSingleton(topic, (IServiceProvider sp, object? _) =>
+            // Implicitly-typed (sp, _): the keyed-factory key is object? on net10.0 and object on net11.0.
+            builder.Services.AddKeyedSingleton(topic, (sp, _) =>
                 new BufferedStreamPublisher(
                     CreateDirect(sp, topic, topicOptions),
                     producer,
@@ -701,10 +699,10 @@ public static class StreamsBuilderExtensions
         if (registry.Stores.Count == before)
             return builder;
 
-        // object? not object: the keyed-factory delegate declares a nullable key — see AddStreamPublisher.
+        // Implicitly-typed (sp, _): the keyed-factory key differs in nullability by TFM — see AddStreamPublisher.
         builder.Services.AddKeyedSingleton<IStreamStore>(
             topic,
-            (IServiceProvider sp, object? _) => new StreamStore(
+            (sp, _) => new StreamStore(
                 sp.GetRequiredService<StreamsConnectionProvider>().Connection.GetDatabase(),
                 topic,
                 topicOptions));
