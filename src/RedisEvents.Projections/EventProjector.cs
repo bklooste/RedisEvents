@@ -1,6 +1,9 @@
+using System.Runtime.ExceptionServices;
+
 using Microsoft.Extensions.Logging;
 
 using RedisEvents.Consumer;
+using RedisEvents.Errors;
 using RedisEvents.Projections.Diagnostics;
 using RedisEvents.Wire;
 
@@ -27,6 +30,16 @@ namespace RedisEvents.Projections;
 /// would silently re-introduce exactly the swallowed-exception bug the reference CQRS implementation
 /// shipped (see <c>PLAN.md</c>, "Why"), just one layer further down; catching here to translate into
 /// some other exception would compete with core's own classification. Neither is this type's job.
+/// </para>
+/// <para>
+/// <b>Batch projections.</b> A projection that also implements <see cref="IBatchProjection"/> buffers
+/// into <see cref="EventMeta.Batch"/> and is flushed once, after the batch's last event and before
+/// <see cref="HandleAsync"/> returns, so before core can record the batch's position. The flush is
+/// part of the batch for the error contract: what it throws propagates out of
+/// <see cref="HandleAsync"/> unchanged, like a projection's own exception. The one place the projector
+/// acts on an exception rather than only passing it through is the skip path: when an event throws an
+/// ordinary exception it flushes the batch projections before rethrowing it, so the skipped batch does
+/// not take the earlier events' buffered work with it. <see cref="IBatchProjection"/> has the rules.
 /// </para>
 /// <para>
 /// <b>Unknown or unprojected events are not errors.</b> A topic legitimately carries event types this
@@ -61,6 +74,7 @@ public sealed class EventProjector : IBatchHandler
     private readonly ILogger? logger;
     private readonly string topic;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> warnedUnknownTypes = new(StringComparer.Ordinal);
+    private readonly bool hasBatchProjections;
 
     /// <summary>
     /// Creates a projector that dispatches through <paramref name="types"/> to <paramref name="projections"/>.
@@ -85,10 +99,145 @@ public sealed class EventProjector : IBatchHandler
         this.projections = projections;
         this.logger = logger;
         this.topic = topic ?? "(unknown)";
+        this.hasBatchProjections = projections.Any(static p => p is IBatchProjection);
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Dispatches every event, then flushes each <see cref="IBatchProjection"/> that was handed one,
+    /// then returns. Core records the position only after this returns, so nothing a batch projection
+    /// buffered can be passed by the position unflushed. See <see cref="IBatchProjection"/> for what
+    /// happens when an event or a flush throws. A projector with no batch projection behaves exactly as
+    /// it did before the hook existed.
+    /// </remarks>
     public async ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
+    {
+        if (batch.IsEmpty)
+        {
+            return;
+        }
+
+        var scope = new ProjectionBatch(this.topic, batch.Span[0].Partition);
+
+        // The batch projections handed at least one event in this batch, in first-dispatch order; null when
+        // this projector has none, so a projector without the hook allocates nothing more than the scope. A
+        // projector has a handful of projections, so a list with a reference Contains is enough.
+        var toFlush = this.hasBatchProjections ? new List<IBatchProjection>() : null;
+
+        try
+        {
+            try
+            {
+                await this.DispatchAsync(batch, scope, toFlush, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (toFlush is { Count: > 0 } && !Redelivers(ex, ct))
+            {
+                // An ordinary exception: core will skip this batch and advance past it. Per-event
+                // projections have already written the events before the failing one; flush the batch
+                // projections so they have too, and the position does not pass rows held in the scope.
+                try
+                {
+                    await this.FlushAllAsync(scope, toFlush, ct).ConfigureAwait(false);
+                }
+                catch (Exception flush) when (Redelivers(flush, ct))
+                {
+                    // The store behind the flush is down (or the host is stopping): block or redeliver
+                    // instead of skipping, or the held rows would be lost when the position advances.
+                    throw;
+                }
+                catch (Exception flush)
+                {
+                    this.logger?.LogError(
+                        flush,
+                        "EventProjector: flushing batch projections on topic={Topic} partition={Partition} after an event failed also failed with {ExceptionType}. " +
+                        "The event's {OriginalType} is rethrown and the batch is skipped, so this batch's buffered work is lost.",
+                        this.topic,
+                        scope.Partition,
+                        flush.GetType().Name,
+                        ex.GetType().Name);
+                }
+
+                throw;
+            }
+
+            if (toFlush is { Count: > 0 })
+            {
+                await this.FlushAllAsync(scope, toFlush, ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            scope.Close();
+        }
+    }
+
+    /// <summary>
+    /// Whether core redelivers the batch after <paramref name="ex"/> rather than skipping it: a
+    /// <see cref="DontIgnoreException"/> blocks and retries it, and a cancellation on shutdown leaves the
+    /// position where it was.
+    /// </summary>
+    private static bool Redelivers(Exception ex, CancellationToken ct) =>
+        ex is DontIgnoreException || (ex is OperationCanceledException && ct.IsCancellationRequested);
+
+    /// <summary>
+    /// Flushes every batch projection in order. An ordinary failure does not stop the others (a skipped
+    /// batch advances past their work too); the first is rethrown at the end and the rest are logged. A
+    /// <see cref="DontIgnoreException"/> or shutdown propagates at once: the batch is redelivered whole.
+    /// </summary>
+    private async ValueTask FlushAllAsync(ProjectionBatch scope, List<IBatchProjection> toFlush, CancellationToken ct)
+    {
+        ExceptionDispatchInfo? first = null;
+
+        foreach (var projection in toFlush)
+        {
+            try
+            {
+                await FlushOneAsync(projection, scope, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!Redelivers(ex, ct))
+            {
+                if (first is null)
+                {
+                    first = ExceptionDispatchInfo.Capture(ex);
+                }
+                else
+                {
+                    this.logger?.LogError(
+                        ex,
+                        "EventProjector: flush of {Projection} on topic={Topic} partition={Partition} also failed with {ExceptionType}; " +
+                        "the first flush failure in the batch is the one rethrown.",
+                        projection.GetType().Name,
+                        this.topic,
+                        scope.Partition,
+                        ex.GetType().Name);
+                }
+            }
+        }
+
+        first?.Throw();
+    }
+
+    private static async ValueTask FlushOneAsync(IBatchProjection projection, ProjectionBatch scope, CancellationToken ct)
+    {
+        using var activity = ProjectionsSpans.StartFlush(projection.GetType().Name, scope.Topic, scope.Partition);
+
+        try
+        {
+            await projection.FlushAsync(scope, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ProjectionsSpans.Failed(activity, ex);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Decodes and dispatches each event in batch order: the projector's whole job before the batch-projection hook,
+    /// unchanged by it except that each event's meta carries <paramref name="scope"/> and each batch projection handed
+    /// an event is recorded in <paramref name="toFlush"/>.
+    /// </summary>
+    private async ValueTask DispatchAsync(ReadOnlyMemory<StreamMsg> batch, ProjectionBatch scope, List<IBatchProjection>? toFlush, CancellationToken ct)
     {
         for (var i = 0; i < batch.Length; i++)
         {
@@ -137,7 +286,10 @@ public sealed class EventProjector : IBatchHandler
             var meta = new EventMeta(
                 PartitionKey: msg.PartitionKey,
                 Id: msg.Id,
-                CorrelationId: msg.CorrelationId);
+                CorrelationId: msg.CorrelationId)
+            {
+                Batch = scope,
+            };
 
             // One span covers dispatch to every projection bound to this event — several may bind to
             // the same wire type, and they run as one unit of work, the same way core reports one
@@ -156,6 +308,13 @@ public sealed class EventProjector : IBatchHandler
             {
                 foreach (var (projection, binder) in bound)
                 {
+                    // Recorded before the call, so a batch projection that buffered part of this event and then
+                    // threw is still flushed on the skip path in HandleAsync.
+                    if (toFlush is not null && projection is IBatchProjection batched && !toFlush.Contains(batched))
+                    {
+                        toFlush.Add(batched);
+                    }
+
                     await binder(@event, projection, meta, ct).ConfigureAwait(false);
                 }
             }
