@@ -1,0 +1,38 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!--
+	  Batched, exactly-once-per-key workflow starts from a RedisEvents stream into a Restate ingress.
+	  Depends on core only (for IBatchHandler<T>, StreamMsg<T> and DontIgnoreException); talks to
+	  Restate over plain HttpClient with source-generated JSON, so it stays AOT- and trim-safe and
+	  carries no Restate SDK.
+	-->
+	<PropertyGroup>
+		<TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+		<IsAotCompatible>true</IsAotCompatible>
+		<Description>Starts Restate workflows from RedisEvents streams in batches: a filter-and-map IBatchHandler&lt;T&gt; base that submits each kept message to its own workflow key over the Restate ingress, retries per item, and blocks the partition (never skips) while any start is not accepted.</Description>
+		<PackageTags>redis;redis-streams;restate;workflows;durable-execution</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="../RedisEvents/RedisEvents.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="RedisEvents.Restate.UnitTests" />
+	</ItemGroup>
+
+</Project>

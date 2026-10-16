@@ -4,6 +4,34 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-16
+
+### Added
+
+- **New package `RedisEvents.Restate`: batched Restate workflow starts from a stream.**
+  `RestateStartHandler<T>` is an `IBatchHandler<T>` base. A subclass supplies `Keep`, an in-memory
+  filter, and `Map`, which returns `(workflow, key, input)`.
+  - **Submit.** Each kept message becomes `POST {ingress}/{workflow}/{key}/run/send`, sent
+    bounded-parallel (default 8). The request has a JSON body serialized through caller-supplied,
+    source-generated options and a W3C `traceparent`. It deliberately has no `Idempotency-Key`:
+    Restate 1.8 answers `400` to that header on a workflow handler, and the workflow key is the dedupe.
+  - **Ack rule.** Each item is retried in place (5 attempts, 200 ms doubling to 5 s). Any 2xx counts
+    as accepted; `202 "PreviouslyAccepted"` also counts as already started. If any item is still not
+    accepted, the handler throws `RestateStartBlockedException`, a `DontIgnoreException` that names
+    the failed keys. The partition then blocks and retries the whole batch. A batch with nothing kept
+    makes no call and acks.
+  - **Exception boundary.** `RestateStartBlockedException` is the only exception that leaves
+    `HandleAsync`. That includes timeouts, a throwing `Keep` or `Map`, an unknown input type and a
+    cancelled token, because `BestEffort` would skip any other exception and silently lose starts.
+  - **Telemetry.** Counters `restate.start.kept`, `.filtered`, `.accepted`, `.already_started`,
+    `.retried` and `.blocked`, plus a `restate.start {workflow}` client span. Register them with
+    `AddRedisEventsRestate()`.
+
+### Fixed
+
+- **`RedisEvents.MessagePack`: MessagePack 3.1.8 → 3.1.12** for GHSA-qhrr-8q5h-9q3h. The advisory
+  made restore fail under `TreatWarningsAsErrors` (NU1902).
+
 ## 2026-10-15
 
 ### Added

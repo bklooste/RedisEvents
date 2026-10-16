@@ -85,6 +85,11 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   consumer, so positions, replay and the error contract are exactly core's, with nothing added on top.
   `RedisEvents.EventSourcing` depends on this package (for a shared event-type registry per topic); this
   package never depends back.
+- **Batched Restate workflow starts, as an opt-in package.**
+  [`RedisEvents.Restate`](src/RedisEvents.Restate/README.md) is an `IBatchHandler<T>` base you give a
+  filter and a `msg => (workflow, key, input)` map. Kept messages are started over the Restate ingress,
+  each on its own workflow key, bounded-parallel with per-item retry. The batch is acked only when every
+  start has been accepted; otherwise the partition blocks (never skips).
 
 ## Quickstart
 
@@ -284,6 +289,7 @@ src/
   RedisEvents.EventSourcing/ event-sourced aggregate root + optimistic-concurrency repository (write side)
   RedisEvents.Projections/   typed event projector + view stores on any standard topic (read side); no
                               dependency on RedisEvents.EventSourcing — that package depends on this one
+  RedisEvents.Restate/       batched Restate workflow starts from a stream (filter + map; blocks, never skips)
 samples/
   RedisEvents.EventSourcing.Sample.Inventory/           a worked example (not published) used as test fixtures
   RedisEvents.EventSourcing.Sample.Inventory.CommandApi/ runnable command-side microservice built on the sample above
@@ -296,6 +302,7 @@ tst/
   RedisEvents.EventSourcing.Tests/         RedisEvents.EventSourcing integration tests against a real Redis
   RedisEvents.Projections.UnitTests/       RedisEvents.Projections unit tests
   RedisEvents.Projections.Tests/           RedisEvents.Projections integration tests against a real Redis
+  RedisEvents.Restate.UnitTests/           RedisEvents.Restate unit tests against a fake Restate ingress
   RedisEvents.EventSourcing.Sample.Tests/  both sample microservices hosted together over real HTTP and a real Redis
   RedisEvents.TestSupport/                 shared Redis Testcontainers fixture used by the integration-test projects
 ```
