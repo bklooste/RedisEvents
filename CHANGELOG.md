@@ -4,6 +4,17 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-21
+
+### Added
+
+- **`StreamAdmin.ReadTopicTailAsync(redis, topic, options, ct)`: a public per-partition tail read.**
+  Returns `IReadOnlyList<StreamId>` (index = partition) from `XINFO STREAM … last-generated-id`,
+  pipelined, so it is exact for trimmed streams. A missing or never-written partition reports `0-0`.
+  Keys honour `KeyNamespace` and `TopicOptions.CoLocatePartitions`; the partition count is the
+  caller's configured one. For catch-up gates: capture the tail, then wait until a consumer's
+  position on every partition is at or past it. Additive.
+
 ## 2026-10-16
 
 ### Added
