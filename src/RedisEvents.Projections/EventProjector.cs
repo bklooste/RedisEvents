@@ -52,10 +52,13 @@ namespace RedisEvents.Projections;
 /// and both are correct for the context they run in.
 /// </para>
 /// <para>
-/// A malformed body that fails to decode is different: <see cref="EventTypeRegistry.TryDecode"/>
-/// itself throws in that case (it does not return <see langword="false"/> for a known type it simply
-/// could not parse), and that throw is left to propagate for the same no-catch reason as a
-/// projection's own exception.
+/// <b>A malformed entry is skipped per entry, not per batch.</b> When a known wire type's body fails
+/// to decode, <see cref="EventTypeRegistry.TryDecode"/> throws; the projector catches that one
+/// ordinary exception, logs it at <see cref="LogLevel.Error"/> with the entry's id and wire type,
+/// counts it in <c>redisevents.projections.events.malformed</c>, and carries on with the rest of the
+/// batch. Letting it propagate would make core skip the whole batch, silently losing every later
+/// event in it. A <see cref="RedisEvents.Errors.DontIgnoreException"/> or shutdown cancellation from
+/// a decoder still propagates. A projection's own exception is unchanged: it propagates.
 /// </para>
 /// <para>
 /// <b>Depends only on standard RedisEvents streams — nothing here assumes an aggregate.</b> This
@@ -243,7 +246,30 @@ public sealed class EventProjector : IBatchHandler
         {
             var msg = batch.Span[i];
 
-            if (!types.TryDecode(msg.Type, msg.Body, out var @event))
+            object @event;
+            bool known;
+            try
+            {
+                known = types.TryDecode(msg.Type, msg.Body, out @event);
+            }
+            catch (Exception ex) when (!Redelivers(ex, ct))
+            {
+                // A known wire type whose body will not decode is a fault in that one entry, not in the batch:
+                // skip it (logged with its id and type, counted) and keep projecting the rest. Rethrowing here
+                // would make core skip the whole batch and silently lose every later event in it.
+                ProjectionsDiagnostics.MalformedEvents.Add(
+                    1,
+                    new KeyValuePair<string, object?>("topic", this.topic),
+                    new KeyValuePair<string, object?>("wire_type", msg.Type));
+                logger?.LogError(
+                    ex,
+                    "EventProjector: skipping malformed event of wire type '{WireType}' on topic={Topic} partition={Partition} id={Id} partitionKey={PartitionKey} — " +
+                    "its body failed to decode with {ExceptionType}. The rest of the batch is still projected.",
+                    msg.Type, this.topic, msg.Partition, msg.Id.Format(), msg.PartitionKey, ex.GetType().Name);
+                continue;
+            }
+
+            if (!known)
             {
                 // Warning the first time a wire type is met and Debug after that: a topic may carry types this
                 // projector does not want, so every skip at Warning would flood, and none at all hides a renamed tag.

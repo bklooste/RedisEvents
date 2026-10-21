@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 
 namespace RedisEvents.Projections.Diagnostics;
 
@@ -24,4 +25,11 @@ internal static class ProjectionsDiagnostics
 
     /// <summary>ActivitySource for OpenTelemetry tracing.</summary>
     internal static readonly ActivitySource Source = new(SourceName, Version);
+
+    /// <summary>Meter for OpenTelemetry metrics, under the same name as <see cref="Source"/>.</summary>
+    internal static readonly Meter Meter = new(SourceName, Version);
+
+    /// <summary>Events skipped because a known wire type's body failed to decode. Tagged topic, wire_type.</summary>
+    internal static readonly Counter<long> MalformedEvents =
+        Meter.CreateCounter<long>("redisevents.projections.events.malformed", "events", "Events skipped because their body failed to decode");
 }

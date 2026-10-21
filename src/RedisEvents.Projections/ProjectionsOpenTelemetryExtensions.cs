@@ -1,3 +1,4 @@
+using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 
 using RedisEvents.Projections.Diagnostics;
@@ -36,5 +37,17 @@ public static class ProjectionsOpenTelemetryExtensions
         ArgumentNullException.ThrowIfNull(builder);
 
         return builder.AddSource(TelemetrySourceName);
+    }
+
+    /// <summary>
+    /// Emits the package's metrics — <c>redisevents.projections.events.malformed</c> — into this meter provider.
+    /// </summary>
+    /// <param name="builder">The meter provider builder.</param>
+    /// <returns>The same builder, for chaining.</returns>
+    public static MeterProviderBuilder AddRedisEventProjections(this MeterProviderBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        return builder.AddMeter(TelemetrySourceName);
     }
 }

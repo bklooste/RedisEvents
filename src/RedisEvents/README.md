@@ -427,9 +427,11 @@ sibling exists too, taking `in StreamMsg<T>` one message at a time, the same rel
 
 A large batch is deserialised in parallel (chunks of 10 messages, split across cores) rather than one
 message at a time — below that size the parallelism overhead costs more than it saves, so a small
-batch stays a plain loop. Either way, a deserialisation failure surfaces as an ordinary exception from
-the handler call, subject to the same `ErrorPolicy` as any other failure — there is nothing special
-about a malformed body versus a bug in your own handler logic.
+batch stays a plain loop. Either way, a body that fails to deserialise is that entry's fault, not the
+batch's: it is logged at `Error` with its id and type and dropped, and the handler is called with the
+rest of the batch (not at all if every entry failed). A `DontIgnoreException` thrown by a deserialiser
+still propagates and blocks the partition. A single-message `IMessageHandler<T>` is unchanged: the
+failure is an ordinary exception for that one message, logged and skipped.
 
 `AddStream<THandler, TMessage>` also has a `Func<ReadOnlyMemory<byte>, TMessage?>`-based overload
 underneath the `JsonTypeInfo<TMessage>` one shown above — the serialisation-format-agnostic seam a
