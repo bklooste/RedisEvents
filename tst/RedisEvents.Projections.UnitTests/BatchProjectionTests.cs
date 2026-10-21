@@ -265,7 +265,7 @@ public class BatchProjectionTests
 
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public async Task An_event_failure_before_any_batch_projection_was_handed_an_event_is_rethrown_as_before()
+    public async Task A_batch_of_only_a_malformed_entry_is_skipped_without_dispatch_or_flush()
     {
         var registry = Registry();
         var projection = new BufferingProjection();
@@ -282,7 +282,7 @@ public class BatchProjectionTests
 
         var act = async () => await projector.HandleAsync(new[] { poison }, CancellationToken.None);
 
-        await act.Should().ThrowAsync<System.Text.Json.JsonException>();
+        await act.Should().NotThrowAsync("a malformed entry is skipped per entry, not thrown for the batch");
         projection.Timeline.Should().BeEmpty();
     }
 
@@ -353,6 +353,36 @@ public class BatchProjectionTests
         var act = () => batch.GetOrAdd(owner, () => new List<string>());
 
         act.Should().Throw<InvalidOperationException>().WithMessage("*List`1*");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task A_malformed_entry_is_skipped_and_the_rest_of_the_batch_is_still_projected_and_flushed()
+    {
+        var registry = Registry();
+        var buffering = new BufferingProjection();
+        var plain = new PlainProjection();
+        var projector = new EventProjector(registry, [buffering, plain], logger: null, topic: "orders");
+        var batch = Batch(("a", "1"), ("a", "2"), ("a", "3"), ("a", "4"));
+        batch[1] = batch[1] with { Body = "{not json"u8.ToArray() };
+
+        long malformed = 0;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == "RedisEvents.Projections" && instrument.Name == "redisevents.projections.events.malformed")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref malformed, value));
+        listener.Start();
+
+        await projector.HandleAsync(batch, CancellationToken.None);
+
+        buffering.Flushed.Should().ContainSingle().Which.Should().Equal("1", "3", "4");
+        plain.Received.Should().Equal("1", "3", "4");
+        Interlocked.Read(ref malformed).Should().BeGreaterThanOrEqualTo(1);
     }
 
     private static EventTypeRegistry Registry() => new EventTypeRegistry()

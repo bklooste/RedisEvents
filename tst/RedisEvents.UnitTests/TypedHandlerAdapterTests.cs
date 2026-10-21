@@ -73,25 +73,47 @@ public class TypedHandlerAdapterTests
         }
     }
 
-    [Fact]
+    [Theory]
     [Trait("TestType", "UnitTest")]
-    public async Task Batch_adapter_propagates_a_deserialisation_failure_from_the_parallel_path()
+    [InlineData(5)]                                                 // sequential path
+    [InlineData(TypedBatchHandlerAdapter<TypedOrder>.ChunkSize + 1)] // chunked parallel path
+    public async Task Batch_adapter_skips_a_malformed_entry_and_still_hands_over_the_rest(int count)
     {
         var recorder = new RecordingBatchHandler();
+        var log = new CapturingLog();
         var adapter = new TypedBatchHandlerAdapter<TypedOrder>(recorder, TypedPublishJson.Default.TypedOrder);
+        adapter.Attach(log, "orders", "billing");
 
-        var batch = new StreamMsg[TypedBatchHandlerAdapter<TypedOrder>.ChunkSize + 1];
-        for (var i = 0; i < batch.Length; i++)
+        var bad = 1;
+        var batch = new StreamMsg[count];
+        for (var i = 0; i < count; i++)
         {
-            batch[i] = i == batch.Length - 1
+            batch[i] = i == bad
                 ? new StreamMsg("not json"u8.ToArray(), "T", new StreamId(i + 1, 0), 0, "k", string.Empty, null, HeaderBlock.Empty)
                 : Build(new TypedOrder(i, $"order-{i}"), id: i + 1);
         }
 
-        var act = async () => await adapter.HandleAsync(batch, CancellationToken.None);
+        await adapter.HandleAsync(batch, CancellationToken.None);
 
-        await act.Should().ThrowAsync<JsonException>();
-        recorder.Seen.Should().BeEmpty("a failure while deserialising must not still call the handler");
+        var seen = recorder.Seen.Should().ContainSingle().Subject;
+        seen.Length.Should().Be(count - 1, "only the malformed entry is dropped");
+        seen.ToArray().Select(m => m.Value!.Id).Should().Equal(Enumerable.Range(0, count).Where(i => i != bad));
+        var error = log.At(LogLevel.Error).Should().ContainSingle().Subject;
+        error.Should().Contain("id=2-0").And.Contain("type=T").And.Contain("topic=orders");
+        log.At(LogLevel.Warning).Should().BeEmpty("a decode failure is not a null body");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task Batch_adapter_does_not_call_the_handler_when_every_entry_is_malformed()
+    {
+        var recorder = new RecordingBatchHandler();
+        var adapter = new TypedBatchHandlerAdapter<TypedOrder>(recorder, TypedPublishJson.Default.TypedOrder);
+        var batch = new[] { new StreamMsg("not json"u8.ToArray(), "T", new StreamId(1, 0), 0, "k", string.Empty, null, HeaderBlock.Empty) };
+
+        await adapter.HandleAsync(batch, CancellationToken.None);
+
+        recorder.Seen.Should().BeEmpty();
     }
 
     private static StreamMsg Build(TypedOrder order, long id)

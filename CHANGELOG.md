@@ -6,6 +6,23 @@ actually changed.
 
 ## 2026-10-21
 
+### Fixed
+
+- **A malformed entry no longer skips the rest of its batch.** When one entry had a known type but a
+  body that failed to decode, the decode exception escaped the batch handler and core's error contract
+  skipped the whole batch, silently losing every later entry in it.
+  - `EventProjector` (projections and batch projections) now skips just that entry: logged at `Error`
+    with topic, partition, id, partition key and wire type, and counted in the new
+    `redisevents.projections.events.malformed` counter (tags `topic`, `wire_type`). The rest of the
+    batch is projected and batch projections are flushed as normal, so the position advances past a
+    fully applied batch. Register the meter with the new `MeterProviderBuilder.AddRedisEventProjections()`.
+  - Typed batch consumers (`IBatchHandler<T>` via `AddStream<THandler, TMessage>`, JSON and
+    MessagePack) drop the malformed entry, log it at `Error`, and hand the handler the rest; the
+    handler is not called if every entry failed.
+  - A `DontIgnoreException` (or shutdown cancellation) thrown by a decoder still propagates and blocks.
+    A projection's own exception is unchanged. Single-message handlers were already per entry. No API
+    is removed.
+
 ### Added
 
 - **`StreamAdmin.ReadTopicTailAsync(redis, topic, options, ct)`: a public per-partition tail read.**

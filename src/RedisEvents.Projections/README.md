@@ -272,8 +272,9 @@ event. `EventMeta.Batch` is `null` only when a test calls `HandleAsync` itself; 
 ## Error handling
 
 The projector has no error policy of its own; it has core's. Per event, in batch order: an unknown
-wire type or a known type with no projection bound to it is skipped at `Debug`; a decode failure always
-throws; a projection that throws propagates unchanged and immediately, and the rest of the batch is not
+wire type or a known type with no projection bound to it is skipped at `Debug`; a known type whose body fails
+to decode is skipped at `Error` (entry id and wire type logged, counted in
+`redisevents.projections.events.malformed`) and the rest of the batch is still projected; a projection that throws propagates unchanged and immediately, and the rest of the batch is not
 processed (batch projections are flushed first when the exception is an ordinary one; see
 [Writing once per batch](#writing-once-per-batch)). From there it is exactly
 [core's error contract](../RedisEvents/README.md#the-error-contract): an ordinary exception logs the

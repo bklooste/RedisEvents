@@ -126,13 +126,82 @@ internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler, ITypedHandler
 
     public async ValueTask HandleAsync(ReadOnlyMemory<StreamMsg> batch, CancellationToken ct)
     {
+        // failed[i] marks an entry whose body threw while decoding; it was logged per entry and is dropped
+        // below, so one malformed entry no longer takes the rest of the batch down with it.
+        var failed = new bool[batch.Length];
         var typed = batch.Length <= ChunkSize
-            ? this.DeserializeSequential(batch)
-            : this.DeserializeChunkedParallel(batch);
+            ? this.DeserializeSequential(batch, failed)
+            : this.DeserializeChunkedParallel(batch, failed);
+
+        var failures = 0;
+        foreach (var f in failed)
+        {
+            failures += f ? 1 : 0;
+        }
+
+        if (failures > 0)
+        {
+            if (failures == typed.Length)
+            {
+                return;
+            }
+
+            var kept = new StreamMsg<T>[typed.Length - failures];
+            var j = 0;
+            for (var i = 0; i < typed.Length; i++)
+            {
+                if (!failed[i])
+                {
+                    kept[j++] = typed[i];
+                }
+            }
+
+            batch = DropFailed(batch, failed, kept.Length);
+            typed = kept;
+        }
 
         this.WarnOnNulls(batch, typed);
 
         await this.inner.HandleAsync(typed, ct).ConfigureAwait(false);
+    }
+
+    private static StreamMsg[] DropFailed(ReadOnlyMemory<StreamMsg> batch, bool[] failed, int keptCount)
+    {
+        var span = batch.Span;
+        var kept = new StreamMsg[keptCount];
+        var j = 0;
+        for (var i = 0; i < span.Length; i++)
+        {
+            if (!failed[i])
+            {
+                kept[j++] = span[i];
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// Decodes one entry. An ordinary failure is that entry's fault, not the batch's: it is logged at Error with
+    /// the entry's id and type and the slot is marked failed, so the rest of the batch still reaches the handler.
+    /// A <see cref="Errors.DontIgnoreException"/> from a decoder still propagates and blocks the partition.
+    /// </summary>
+    private StreamMsg<T> DecodeOne(in StreamMsg msg, int index, bool[] failed)
+    {
+        try
+        {
+            return new StreamMsg<T>(this.deserialize(msg.Body), msg);
+        }
+        catch (Exception ex) when (ex is not Errors.DontIgnoreException)
+        {
+            failed[index] = true;
+            this.log?.LogError(
+                ex,
+                "Streams: skipping malformed message for topic={Topic} partition={Partition} consumer={Consumer} id={Id} type={MessageType}: its body failed to decode to {MessageClrType} with {ExceptionType}. " +
+                "The rest of the batch is still handled.",
+                this.topic, msg.Partition, this.consumer, msg.Id.Format(), msg.Type, typeof(T).Name, ex.GetType().Name);
+            return default;
+        }
     }
 
     /// <inheritdoc />
@@ -166,19 +235,19 @@ internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler, ITypedHandler
         }
     }
 
-    private StreamMsg<T>[] DeserializeSequential(ReadOnlyMemory<StreamMsg> batch)
+    private StreamMsg<T>[] DeserializeSequential(ReadOnlyMemory<StreamMsg> batch, bool[] failed)
     {
         var span = batch.Span;
         var result = new StreamMsg<T>[span.Length];
         for (var i = 0; i < span.Length; i++)
         {
-            result[i] = new StreamMsg<T>(this.deserialize(span[i].Body), span[i]);
+            result[i] = this.DecodeOne(in span[i], i, failed);
         }
 
         return result;
     }
 
-    private StreamMsg<T>[] DeserializeChunkedParallel(ReadOnlyMemory<StreamMsg> batch)
+    private StreamMsg<T>[] DeserializeChunkedParallel(ReadOnlyMemory<StreamMsg> batch, bool[] failed)
     {
         var result = new StreamMsg<T>[batch.Length];
         var chunkCount = (batch.Length + ChunkSize - 1) / ChunkSize;
@@ -196,7 +265,7 @@ internal sealed class TypedBatchHandlerAdapter<T> : IBatchHandler, ITypedHandler
 
                 for (var i = start; i < end; i++)
                 {
-                    result[i] = new StreamMsg<T>(this.deserialize(span[i].Body), span[i]);
+                    result[i] = this.DecodeOne(in span[i], i, failed);
                 }
             });
         }
