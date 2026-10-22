@@ -191,6 +191,20 @@ public sealed class CachedAggregateTests
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
+    [Fact]
+    public async Task Without_a_concurrency_check_a_conflict_cannot_happen_and_the_instance_stays_cached()
+    {
+        var repository = new FakeEventRepository { ConflictsToForce = int.MaxValue };
+        var runner = new CachedAggregate<Counter>();
+
+        await runner.RunAsync(LoaderFor(repository), repository, (c, _, _) => Done(c.Increment(1)), concurrencyCheck: false, ct: default);
+        var result = await runner.RunAsync(LoaderFor(repository), repository, (c, _, _) => Done(c.Increment(1)), concurrencyCheck: false, ct: default);
+
+        result.Should().Be(2);
+        repository.UncheckedSaves.Should().Be(2);
+        repository.Loads.Should().Be(1, "an unchecked save that committed leaves the instance cached");
+    }
+
     private static ValueTask<AggregateDecision<int>> Done(int value) => new(AggregateDecision<int>.Done(value));
 
     private static ValueTask<AggregateDecision<int>> Redo() => new(AggregateDecision<int>.Redo());
@@ -266,7 +280,21 @@ public sealed class CachedAggregateTests
             return ValueTask.FromResult(aggregate.Version);
         }
 
-        public ValueTask<int> SaveWithoutConcurrencyCheckAsync(AggregateRoot aggregate, PublishOptions options = default, CancellationToken ct = default) =>
-            this.SaveAsync(aggregate, null, options, ct);
+        public int UncheckedSaves { get; private set; }
+
+        public ValueTask<int> SaveWithoutConcurrencyCheckAsync(AggregateRoot aggregate, PublishOptions options = default, CancellationToken ct = default)
+        {
+            UncheckedSaves++;
+            var conflicts = this.ConflictsToForce;
+            this.ConflictsToForce = 0;
+            try
+            {
+                return this.SaveAsync(aggregate, null, options, ct);
+            }
+            finally
+            {
+                this.ConflictsToForce = conflicts;
+            }
+        }
     }
 }
