@@ -100,6 +100,12 @@ public sealed class CachedAggregate<TAggregate>
     /// must expose its own true version (typically <c>snapshotBaseVersion + Version</c>) for this to
     /// pass in instead.
     /// </param>
+    /// <param name="concurrencyCheck">
+    /// <see langword="false"/> saves with <see cref="IEventRepository.SaveWithoutConcurrencyCheckAsync"/>:
+    /// no version check, so no conflict, no retry, and <paramref name="expectedVersion"/> is unused. Only
+    /// for an aggregate whose writers accept deciding against a cached copy that another process may have
+    /// moved past — a house or totals account whose decisions don't depend on exact current state.
+    /// </param>
     /// <param name="ct">Cancellation.</param>
     /// <returns>The result <paramref name="apply"/> decided, once its decision has been saved (or needed no save).</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxAttempts"/> is less than 1.</exception>
@@ -113,6 +119,7 @@ public sealed class CachedAggregate<TAggregate>
         int maxAttempts = 1,
         Func<int, ConcurrencyException, CancellationToken, Task>? onConflict = null,
         Func<TAggregate, int>? expectedVersion = null,
+        bool concurrencyCheck = true,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(load);
@@ -146,6 +153,13 @@ public sealed class CachedAggregate<TAggregate>
 
             if (aggregate.GetUncommittedChanges().Count == 0)
             {
+                this.cached = aggregate;
+                return decision.Result;
+            }
+
+            if (!concurrencyCheck)
+            {
+                await repository.SaveWithoutConcurrencyCheckAsync(aggregate, ct: ct).ConfigureAwait(false);
                 this.cached = aggregate;
                 return decision.Result;
             }
