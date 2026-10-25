@@ -182,11 +182,15 @@ internal static partial class PartitionWorker
         // attempt, so the finally must not add the whole blocked period on top.
         var timing = true;
 
+        // Where a per-message handler's failure left off, shared with the blocking retry so it
+        // resumes at the failing message rather than replaying the ones already recorded.
+        var resume = new ResumePoint();
+
         try
         {
             try
             {
-                await InvokeAsync(ctx, batch, handler, positions, persist, flush, ct).ConfigureAwait(false);
+                await InvokeAsync(ctx, batch, handler, positions, persist, flush, resume, ct).ConfigureAwait(false);
 
                 if (!empty)
                 {
@@ -218,7 +222,7 @@ internal static partial class PartitionWorker
                 activity?.Dispose();
                 activity = null;
 
-                return await BlockAndRetryAsync(ctx, batch, ex, span, handler, positions, persist, flush, ct)
+                return await BlockAndRetryAsync(ctx, batch, ex, span, handler, positions, persist, flush, resume, ct)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -406,13 +410,23 @@ internal static partial class PartitionWorker
         Func<ReadOnlyMemory<StreamMsg>, CancellationToken, ValueTask> handler,
         PositionRecorder positions,
         PositionFlush flush,
+        int start,
         CancellationToken ct)
     {
         var memory = batch.AsMemory();
 
-        for (var i = 0; i < batch.Count; i++)
+        for (var i = start; i < batch.Count; i++)
         {
-            await handler(memory.Slice(i, 1), ct).ConfigureAwait(false);
+            try
+            {
+                await handler(memory.Slice(i, 1), ct).ConfigureAwait(false);
+            }
+            catch (MessageFailedException failed)
+            {
+                // The adapter saw a one-message batch, so its index is always 0; report the real one,
+                // relative to where this call started, as InvokeAsync expects.
+                throw new MessageFailedException(i - start, failed.Original);
+            }
 
             ctx.Monitor?.Observe(memory.Span[i].Id);
             positions(ctx.Partition, memory.Span[i].Id);
@@ -475,6 +489,7 @@ internal static partial class PartitionWorker
         PositionRecorder positions,
         PersistMode persist,
         PositionFlush? flush,
+        ResumePoint resume,
         CancellationToken ct)
     {
         if (batch.Count == 0)
@@ -487,16 +502,100 @@ internal static partial class PartitionWorker
             return;
         }
 
-        if (persist == PersistMode.SyncMessage)
+        // A per-message handler's failure names the message (see HandlerAdapter.AdaptMessage). The
+        // policy is applied to that message alone, so one bad message cannot drop the rest of its
+        // batch. A batch handler never throws MessageFailedException and takes the whole-batch path.
+        while (true)
         {
-            await HandlePerMessageAsync(ctx, batch, handler, positions, flush!, ct).ConfigureAwait(false);
-            return;
+            var start = resume.Start;
+
+            try
+            {
+                if (persist == PersistMode.SyncMessage)
+                {
+                    await HandlePerMessageAsync(ctx, batch, handler, positions, flush!, start, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    await handler(batch.AsMemory().Slice(start), ct).ConfigureAwait(false);
+                }
+
+                break;
+            }
+            catch (MessageFailedException failed)
+            {
+                var at = start + failed.Index;
+                var items = batch.Items;
+
+                // Everything before the failing message succeeded. Record it, so that a block, a
+                // stop or a crash resumes at the failing message instead of replaying the lot.
+                // SyncMessage already recorded and flushed each one as it went.
+                if (at > start && persist != PersistMode.SyncMessage)
+                {
+                    await AdvanceAsync(ctx, items[at - 1].Id, positions, persist, flush, ct).ConfigureAwait(false);
+                }
+
+                resume.Start = at;
+
+                if (failed.Original is DontIgnoreException || ctx.OnError != ErrorPolicy.BestEffort)
+                {
+                    // Block, StopPartition or Fail: surface the handler's own exception, with its
+                    // own stack, to the code that applies them. The position stays at the message
+                    // before `at`, and a blocking retry resumes at `at`.
+                    ExceptionDispatchInfo.Capture(failed.Original).Throw();
+                }
+
+                // BestEffort: log it, skip just this message and carry on with the rest.
+                CountError(in ctx, "best_effort", failed.Original);
+                ctx.Log.LogError(
+                    failed.Original,
+                    "Streams: handler threw {ExceptionType} for topic={Topic} partition={Partition} consumer={Consumer} id={Id} type={MessageType}. " +
+                    "ErrorPolicy.BestEffort: skipping this message and continuing with the rest of the batch. The library does not retry and has no dead-letter queue — " +
+                    "the handler owns retry, or should throw a DontIgnoreException to block instead.",
+                    failed.Original.GetType().Name,
+                    ctx.Topic,
+                    ctx.Partition,
+                    ctx.Consumer,
+                    items[at].Id.Format(),
+                    items[at].Type);
+
+                resume.Start = at + 1;
+
+                if (persist != PersistMode.SyncMessage)
+                {
+                    await AdvanceAsync(ctx, items[at].Id, positions, persist, flush, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    // The skipped message is checkpointed like a handled one.
+                    ctx.Monitor?.Observe(items[at].Id);
+                    positions(ctx.Partition, items[at].Id);
+                    await flush!(ct).ConfigureAwait(false);
+                }
+
+                if (resume.Start >= batch.Count)
+                {
+                    break;
+                }
+            }
         }
 
-        await handler(batch.AsMemory(), ct).ConfigureAwait(false);
+        // Step 3, and the only place a position is ever recorded on success. SyncMessage has
+        // recorded and flushed every message already.
+        if (persist != PersistMode.SyncMessage)
+        {
+            await AdvanceAsync(ctx, batch.Last, positions, persist, flush, ct).ConfigureAwait(false);
+        }
+    }
 
-        // Step 3, and the only place a position is ever recorded on success.
-        await AdvanceAsync(ctx, batch.Last, positions, persist, flush, ct).ConfigureAwait(false);
+    /// <summary>
+    /// How far into a batch a per-message handler got before a failure that was not skipped, so the
+    /// blocking retry resumes at the failing message. One per batch; zero for everything else.
+    /// </summary>
+    private sealed class ResumePoint
+    {
+        /// <summary>Index of the first message not yet handled or skipped.</summary>
+        internal int Start { get; set; }
     }
 
     /// <summary>
@@ -553,6 +652,7 @@ internal static partial class PartitionWorker
         PositionRecorder positions,
         PersistMode persist,
         PositionFlush? flush,
+        ResumePoint resume,
         CancellationToken ct)
     {
         CountError(in ctx, "block", first);
@@ -628,7 +728,7 @@ internal static partial class PartitionWorker
                 {
                     try
                     {
-                        await InvokeAsync(ctx, batch, handler, positions, persist, flush, ct).ConfigureAwait(false);
+                        await InvokeAsync(ctx, batch, handler, positions, persist, flush, resume, ct).ConfigureAwait(false);
 
                         if (!batch.IsEmpty)
                         {
