@@ -707,3 +707,120 @@ public class StartupFailFastTests
         delays.Delays.Should().BeEmpty();
     }
 }
+
+/// <summary>
+/// A per-message handler (<see cref="IMessageHandler"/>) is adapted to the batch loop, and the error
+/// contract still holds per message: an ordinary exception logs and skips <em>that</em> message, a
+/// <see cref="DontIgnoreException"/> or a StopPartition/Fail policy leaves the position at the
+/// failing message so the retry or restart resumes there.
+/// </summary>
+public class PerMessageErrorTests
+{
+    /// <summary>Handles by body text; throws the configured exception the first <c>failTimes</c> times it sees <c>failOn</c>.</summary>
+    private sealed class Handler(string failOn, Func<Exception> failure, int failTimes = int.MaxValue) : IMessageHandler
+    {
+        private int failed;
+
+        internal List<string> Handled { get; } = [];
+
+        public ValueTask HandleAsync(in StreamMsg msg, CancellationToken ct)
+        {
+            var body = System.Text.Encoding.UTF8.GetString(msg.Body.Span);
+            Handled.Add(body);
+
+            if (body == failOn && failed++ < failTimes)
+            {
+                throw failure();
+            }
+
+            return default;
+        }
+    }
+
+    /// <summary>Queues one batch of five messages (bodies "1".."5", ids 1-0..5-0) and completes the channel.</summary>
+    private static (System.Threading.Channels.Channel<StreamBatch> Channel, StreamId[] Ids) FiveMessageBatch()
+    {
+        var channel = PartitionWorker.CreateChannel(4);
+        var entries = Enumerable.Range(1, 5).Select(i => Pipeline.Entry(i, 0, "Keep", i.ToString())).ToArray();
+        var items = StreamBatch.Rent(5);
+        for (var i = 0; i < 5; i++)
+        {
+            var entry = entries[i];
+            items[i] = EntryCodec.Decode(in entry, partition: 0);
+        }
+
+        channel.Writer.TryWrite(new StreamBatch(items, 5, items[4].Id)).Should().BeTrue();
+        channel.Writer.Complete();
+
+        return (channel, items.Take(5).Select(m => m.Id).ToArray());
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task BestEffort_Skips_Only_The_Failing_Message_And_The_Position_Passes_The_Batch()
+    {
+        var log = new CapturingLog();
+        var (channel, ids) = FiveMessageBatch();
+        var ctx = ErrorHandling.Context(channel.Writer, log);
+        var handler = new Handler("3", () => new InvalidOperationException("poison"));
+        var recorded = new List<StreamId>();
+
+        await PartitionWorker.ProcessLoopAsync(
+            ctx,
+            HandlerAdapter.AdaptMessage(handler),
+            (_, id) => recorded.Add(id),
+            CancellationToken.None,
+            channel.Reader);
+
+        handler.Handled.Should().Equal("1", "2", "3", "4", "5");
+        recorded.Last().Should().Be(ids[4], "the position ends past the last message");
+        recorded.Should().BeInAscendingOrder();
+        log.At(LogLevel.Error).Should().ContainSingle().Which.Should().Contain("skipping this message");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task DontIgnore_Records_The_Messages_Before_It_And_The_Retry_Resumes_At_The_Failing_Message()
+    {
+        var log = new CapturingLog();
+        var (channel, ids) = FiveMessageBatch();
+        var ctx = ErrorHandling.Context(channel.Writer, log);
+        PartitionWorker.BlockDelay = new ScriptedDelay().DelayAsync;
+
+        // Fails once, then succeeds on the retry.
+        var handler = new Handler("3", () => new MandatoryDownstreamDownException("down"), failTimes: 1);
+        var recorded = new List<StreamId>();
+
+        await PartitionWorker.ProcessLoopAsync(
+            ctx,
+            HandlerAdapter.AdaptMessage(handler),
+            (_, id) => recorded.Add(id),
+            CancellationToken.None,
+            channel.Reader);
+
+        handler.Handled.Should().Equal("1", "2", "3", "3", "4", "5");
+        recorded.Should().Contain(ids[1], "messages before the failure are recorded before the block");
+        recorded.Last().Should().Be(ids[4]);
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task StopPartition_Records_The_Messages_Before_The_Failing_One_Only()
+    {
+        var log = new CapturingLog();
+        var (channel, ids) = FiveMessageBatch();
+        var ctx = ErrorHandling.Context(channel.Writer, log, ErrorPolicy.StopPartition);
+        var handler = new Handler("3", () => new InvalidOperationException("poison"));
+        var recorded = new List<StreamId>();
+
+        await PartitionWorker.ProcessLoopAsync(
+            ctx,
+            HandlerAdapter.AdaptMessage(handler),
+            (_, id) => recorded.Add(id),
+            CancellationToken.None,
+            channel.Reader);
+
+        handler.Handled.Should().Equal("1", "2", "3");
+        recorded.Should().Equal(ids[1]);
+    }
+}

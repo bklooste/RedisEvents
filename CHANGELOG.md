@@ -14,6 +14,17 @@ actually changed.
   pump now reconciles the topic once before issuing its first batch. A reconcile failure is logged and
   retried on the next batch.
 - **Docs:** the README said `Topics:<t>:Partitions` defaults to `2`; the code default is `1`.
+- **A failing message in a per-message handler no longer drops the rest of its batch.** With an
+  `IMessageHandler` under the default `BestEffort` policy, one exception advanced the position past the
+  whole batch, so every later message was silently lost, against the documented "an ordinary exception
+  logs and skips the message". The per-message adapter now reports which message failed and the worker
+  applies the policy to that message alone:
+  - `BestEffort` logs, counts and skips just that message and continues with the rest; the position ends
+    past the batch.
+  - A `DontIgnoreException` records the messages before the failing one and blocks; the retry resumes at
+    the failing message instead of replaying the earlier ones.
+  - `StopPartition` and `Fail` leave the position at the message before the failing one.
+  - Batch handlers (`IBatchHandler`) are unchanged: an exception still applies to the whole batch.
 
 ## 2026-10-21
 
