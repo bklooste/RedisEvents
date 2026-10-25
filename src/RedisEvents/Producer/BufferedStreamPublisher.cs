@@ -60,6 +60,7 @@ internal sealed class BufferedStreamPublisher : IStreamBufferedPublisher, IHoste
     private const int StackKeyBytes = 256;
 
     private readonly IStreamPublisher inner;
+    private bool topicEnsured; // pump-only
     private readonly Channel<PendingEntry> channel;
     private readonly ILogger? log;
     private readonly Lock gate = new();
@@ -528,6 +529,9 @@ internal sealed class BufferedStreamPublisher : IStreamBufferedPublisher, IHoste
                     break;
                 }
 
+                // Reconcile the topic once, before the first batch is issued. See EnsureTopicOnceAsync.
+                await this.EnsureTopicOnceAsync(ct).ConfigureAwait(false);
+
                 var count = 0;
                 waiters.Clear();
 
@@ -625,6 +629,49 @@ internal sealed class BufferedStreamPublisher : IStreamBufferedPublisher, IHoste
 
             this.DrainAbandoned();
             StreamsDiagnostics.ClearBufferQueued(this.topic);
+        }
+    }
+
+    /// <summary>
+    /// Makes sure the topic's metadata is reconciled before the pump issues its first XADD.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A cold <see cref="StreamPublisher"/> reconciles the topic lazily: every publish issued before
+    /// that finishes awaits <c>EnsureTopicAsync</c> separately, and when it completes those
+    /// continuations resume in no guaranteed order. A flush pipelines a whole batch without awaiting
+    /// between entries, so on a cold publisher the XADDs for one partition key could reach Redis out
+    /// of order, which breaks the per-key ordering the buffered publisher promises.
+    /// </para>
+    /// <para>
+    /// Doing it once here, before the batch is drained, means every publish in the first flush sees
+    /// an already-ensured publisher and takes the synchronous path, so XADDs are issued in batch
+    /// order. A failure is not fatal: the flag stays unset so the next batch retries, and this batch
+    /// fails (or succeeds) entry by entry exactly as it did before.
+    /// </para>
+    /// </remarks>
+    private async ValueTask EnsureTopicOnceAsync(CancellationToken ct)
+    {
+        if (this.topicEnsured || this.inner is not StreamPublisher cold)
+        {
+            return;
+        }
+
+        try
+        {
+            await cold.EnsureTopicAsync(ct).ConfigureAwait(false);
+            this.topicEnsured = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            this.log?.LogWarning(
+                ex,
+                "Streams: buffered publisher for topic '{Topic}' could not reconcile the topic before its flush; it will retry on the next batch.",
+                this.topic);
         }
     }
 

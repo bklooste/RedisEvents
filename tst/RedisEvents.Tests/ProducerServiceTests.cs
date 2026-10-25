@@ -175,6 +175,48 @@ public sealed class ProducerServiceTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// A cold buffered publisher keeps per-key order on its first flush. Before the fix every
+    /// pipelined publish awaited the lazy topic reconcile separately and the continuations raced, so
+    /// the XADDs for one key could land out of order.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Buffered_cold_publisher_preserves_per_key_order_on_first_flush()
+    {
+        const int Count = 200;
+
+        var topic = fixture.NewTopic();
+        var topicOptions = new TopicOptions { Partitions = 4, Trim = TrimMode.None };
+
+        // Cold: no EnsureTopicAsync, no warm-up publish.
+        var inner = new StreamPublisher(fixture.Db, topic, topicOptions);
+        await using var buffered = new BufferedStreamPublisher(
+            inner,
+            new ProducerOptions { Topic = topic, MaxBatch = 500, MaxWaitMs = 1000, MaxQueue = Count },
+            topicOptions);
+
+        for (var i = 0; i < Count; i++)
+        {
+            var body = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(body, i);
+            await buffered.EnqueueAsync("one-key", body, "Cold.Order");
+        }
+
+        await buffered.FlushAsync(CancellationToken.None).AsTask().WaitAsync(HardTimeout);
+
+        var seen = new List<int>();
+        for (var partition = 0; partition < topicOptions.Partitions; partition++)
+        {
+            foreach (var entry in await fixture.Db.StreamRangeAsync(StreamKeys.Stream(topic, partition), count: null))
+            {
+                seen.Add(BinaryPrimitives.ReadInt32BigEndian(EntryCodec.Decode(entry, partition).Body.Span));
+            }
+        }
+
+        seen.Should().Equal(Enumerable.Range(0, Count), "XRANGE order is publish order for one key");
+    }
+
+    /// <summary>
     /// S16 — the buffered path copies the caller's buffer, so mutating it after
     /// <see cref="BufferedStreamPublisher.EnqueueAsync"/> returns cannot corrupt what is published.
     /// The non-buffered path does not copy, and is safe for the opposite reason: it is awaited.
