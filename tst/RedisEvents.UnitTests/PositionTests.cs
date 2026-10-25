@@ -572,6 +572,93 @@ public class PositionTests
 
     [Fact]
     [Trait("TestType", "UnitTest")]
+    public async Task Reset_Live_TakenJustBeforeStop_MarkerIsDeletedByTheFinalFlush_SoRestartDoesNotRewindAgain()
+    {
+        var redis = new FakeRedis();
+        var key = PositionsKey;
+        var marker = new ResetMarker(0, Id(5), DateTimeOffset.UtcNow);
+        redis.Set(key, StreamAdmin.ResetMarkerField(0), StreamAdmin.FormatResetMarker(marker.Target, marker.IssuedUtc));
+
+        var markerAtSave = new List<string?>();
+        var store = new CountingStore();
+        store.OnSave = () => markerAtSave.Add(redis.Get(key, StreamAdmin.ResetMarkerField(0)));
+
+        var signal = new ResetSignal([0]);
+
+        // An hour: no tick can run, so the poll that would normally delete the marker never does.
+        await using var flusher = new PositionFlusher(
+            store,
+            Topic,
+            Consumer,
+            partitionCount: 1,
+            interval: TimeSpan.FromHours(1),
+            redis: redis.Multiplexer,
+            instanceId: Guid.NewGuid(),
+            resets: signal);
+
+        flusher.Start();
+
+        // The poll tick's part, then the read loop's: take the reset, rewind, and record progress.
+        signal.Request(in marker).Should().BeTrue();
+        signal.TryTake(0, out _).Should().BeTrue();
+        flusher.Rewind(0);
+        flusher.Record(0, Id(700));
+
+        await flusher.StopAsync();
+
+        redis.Get(key, StreamAdmin.ResetMarkerField(0)).Should().BeNull("the final flush deletes a taken marker");
+        markerAtSave.Should().Equal(new string?[] { null }, "the marker is gone before the post-rewind position is written");
+        store.Last.Should().Equal([(0, Id(700))]);
+        signal.IsTaken(0).Should().BeFalse();
+
+        // The restart: nothing left to apply.
+        var restart = await ResetMarkers.TakeAllAsync(redis.Multiplexer.GetDatabase(), Topic, Consumer, log: null, CancellationToken.None);
+        restart.Should().BeEmpty("a second start must not rewind again");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public async Task Reset_Live_TakenPartitionIsNotWrittenWhileItsMarkerIsStillStored()
+    {
+        var redis = new FakeRedis();
+        var key = PositionsKey;
+        var marker = new ResetMarker(0, Id(5), DateTimeOffset.UtcNow);
+        redis.Set(key, StreamAdmin.ResetMarkerField(0), StreamAdmin.FormatResetMarker(marker.Target, marker.IssuedUtc));
+
+        var signal = new ResetSignal([0, 1]);
+        var store = new CountingStore();
+
+        await using var flusher = new PositionFlusher(
+            store,
+            Topic,
+            Consumer,
+            partitionCount: 2,
+            interval: TimeSpan.FromHours(1),
+            redis: redis.Multiplexer,
+            instanceId: Guid.NewGuid(),
+            resets: signal);
+
+        signal.Request(in marker);
+        signal.TryTake(0, out _);
+        flusher.Rewind(0);
+        flusher.Record(0, Id(700));
+        flusher.Record(1, Id(9));
+
+        // The delete cannot happen: the marker field is deleted by a different fake call that fails.
+        redis.FailDeletes = true;
+        await flusher.FlushAsync();
+
+        store.Saved.SelectMany(w => w).Should().NotContain(p => p.Partition == 0,
+            "partition 0's marker is still stored, so its post-rewind position must not be");
+
+        redis.FailDeletes = false;
+        await flusher.FlushAsync();
+
+        store.Saved.SelectMany(w => w).Should().Contain((0, Id(700)), "once the marker is gone the position is released");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
     public async Task Reset_Live_AfterRewind_ABackwardsRecordIsForgivenExactlyOnce()
     {
 #if !DEBUG
@@ -1160,6 +1247,9 @@ public class PositionTests
         /// <summary>Set to make the next <see cref="SaveAsync"/> throw.</summary>
         internal Exception? Throw { get; set; }
 
+        /// <summary>Runs inside <see cref="SaveAsync"/>, before the write is recorded.</summary>
+        internal Action? OnSave { get; set; }
+
         /// <summary>Every <see cref="SaveAsync"/> call, including the empty ones.</summary>
         internal int Calls { get; private set; }
 
@@ -1182,6 +1272,7 @@ public class PositionTests
             CancellationToken ct)
         {
             this.Calls++;
+            this.OnSave?.Invoke();
 
             if (this.Throw is { } boom)
             {
@@ -1342,6 +1433,9 @@ public class PositionTests
         /// <summary>How many fields have been deleted across every <c>HDEL</c>.</summary>
         internal int Deletes { get; private set; }
 
+        /// <summary>When set, every <c>HDEL</c> fails like a dropped connection.</summary>
+        internal bool FailDeletes { get; set; }
+
         /// <summary>How many <c>HMGET</c>s have been issued.</summary>
         internal int Gets { get; private set; }
 
@@ -1382,6 +1476,11 @@ public class PositionTests
                     return Task.FromResult(this.HashGetAll(Key(args[0])));
 
                 case "HashDeleteAsync" when args.Length == 3 && args[1] is RedisValue[] dead:
+                    if (this.FailDeletes)
+                    {
+                        return Task.FromException<long>(new RedisConnectionException(ConnectionFailureType.SocketFailure, "injected"));
+                    }
+
                     return Task.FromResult(this.HashDelete(Key(args[0]), dead));
 
                 case "HashSetAsync" when args.Length == 3 && args[1] is HashEntry[] entries:

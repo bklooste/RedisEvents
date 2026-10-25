@@ -185,6 +185,22 @@ internal sealed class ResetSignal
         return slot >= 0 && Volatile.Read(ref this.slots[slot]) is { Taken: true };
     }
 
+    /// <summary>Whether any partition has a taken reset whose marker field is still to be deleted.</summary>
+    /// <returns><see langword="true"/> when at least one slot is taken. A short scan over one
+    /// worker's owned set; used once per flush.</returns>
+    internal bool AnyTaken()
+    {
+        for (var i = 0; i < this.slots.Length; i++)
+        {
+            if (Volatile.Read(ref this.slots[i]) is { Taken: true })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Clears a slot whose reset a read loop has taken, so the flusher can delete the Redis field.
     /// </summary>
