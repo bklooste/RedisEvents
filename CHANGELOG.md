@@ -4,6 +4,17 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-25
+
+### Fixed
+
+- **`BufferedStreamPublisher` no longer reorders one partition key on a cold publisher's first flush.**
+  Each pipelined publish awaited the lazy topic reconcile separately and the continuations raced, so
+  XADDs for one key could reach Redis out of order, against the per-key ordering the docs promise. The
+  pump now reconciles the topic once before issuing its first batch. A reconcile failure is logged and
+  retried on the next batch.
+- **Docs:** the README said `Topics:<t>:Partitions` defaults to `2`; the code default is `1`.
+
 ## 2026-10-21
 
 ### Fixed

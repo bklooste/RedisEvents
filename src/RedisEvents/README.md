@@ -296,7 +296,7 @@ Keys worth knowing, with their defaults:
 |---|---|---|
 | `ConnectionString` | `redis-db.infra:6379,abortConnect=false` | Point it at `redis-cache` and you lose everything on restart — see below |
 | `Consumer` | entry assembly name | Two services sharing a name share a position hash and each see half the messages |
-| `Topics:<t>:Partitions` | `2` | Can be increased, never decreased. Caps parallelism |
+| `Topics:<t>:Partitions` | `1` | Can be increased, never decreased. Caps parallelism |
 | `Topics:<t>:MaxLen` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
 | `Topics:<t>:Trim` | `Approx` | `None` is refused outside `Development` — it is an OOM footgun |
 | `Topics:<t>:StateMetadata` | `false` | State-store entries hold only body and type; `true` also keeps correlation id, trace and headers, forever |
