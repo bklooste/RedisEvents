@@ -4,6 +4,17 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-27
+
+### Fixed
+
+- **`Delivery = WorkQueue` no longer leaves the last batch unacknowledged when the host stops
+  (R-29).** The `XACK` that follows a successful handler observed the host's stopping token, so a stop
+  requested between the handler returning and the ack made it throw, and the worker treated that as
+  shutdown and dropped the ack. A fully handled batch (or one skipped under `BestEffort`, or filtered)
+  stayed in the pending list until another member's `XAUTOCLAIM` sweep (30 s idle) delivered it a second
+  time. The ack now ignores the stopping token. A batch interrupted mid-handler still stays pending.
+
 ## 2026-10-26
 
 ### Fixed

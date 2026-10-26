@@ -2574,8 +2574,22 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         /// <summary>Acknowledges every fetched batch up to the last recorded id.</summary>
+        /// <remarks>
+        /// <b>R-29: the stopping token is deliberately not observed.</b> This runs only after the
+        /// handler (or a BestEffort skip, or a filter) has finished the batch. If a stop arrives
+        /// between the handler returning and this call, honouring the token threw, the worker read
+        /// that as "shutdown" and dropped the ack, so a fully handled batch stayed in the PEL until
+        /// another member's <c>XAUTOCLAIM</c> sweep re-delivered it. A handler interrupted
+        /// mid-batch never reaches this method, so that batch correctly stays pending. The call is
+        /// one bounded <c>XACK</c> and does not delay shutdown meaningfully.
+        /// </remarks>
+        /// <param name="ct">Ignored; see the remarks.</param>
         /// <returns>A task that completes when the <c>XACK</c> has landed.</returns>
-        internal ValueTask AcknowledgeAsync(CancellationToken ct) => fetch.AckAsync(this.last, ct);
+        internal ValueTask AcknowledgeAsync(CancellationToken ct)
+        {
+            _ = ct;
+            return fetch.AckAsync(this.last, CancellationToken.None);
+        }
     }
 
     /// <summary>One partition's worker, its own cancellation source, and its channel writer.</summary>

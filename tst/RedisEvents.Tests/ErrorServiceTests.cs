@@ -518,6 +518,97 @@ public sealed class ErrorServiceTests(RedisStreamsFixture fixture)
     }
 
     /// <summary>
+    /// R-29 — <c>Delivery = WorkQueue</c>: a batch whose handler completed successfully is
+    /// acknowledged even when the host is told to stop before the handler has returned. The ack
+    /// used to observe the stopping token and was dropped as "shutdown", leaving a finished batch
+    /// in the PEL to be delivered a second time by another member's <c>XAUTOCLAIM</c>.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task S18_Work_queue_acks_a_completed_batch_when_stop_is_requested_during_the_handler()
+    {
+        await this.ResetAsync();
+
+        var topic = fixture.NewTopic();
+        var consumer = fixture.NewConsumer();
+        var topicOptions = new TopicOptions { Partitions = 1 };
+        var publisher = new StreamPublisher(fixture.Db, topic, topicOptions);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await publisher.PublishAsync("k", Utf8($"m{i}"), MessageType, new PublishOptions(Partition: 0));
+        }
+
+        StreamConsumerHost? host = null;
+        var stopStarted = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new TestHandler();
+        handler.OnBatch = async (_, ct) =>
+        {
+            // Request the stop while this handler is still running, wait until the host's token has
+            // actually flipped, then return NORMALLY: the handler finished its work.
+            var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var registration = ct.Register(static s => ((TaskCompletionSource)s!).TrySetResult(), cancelled);
+            stopStarted.TrySetResult(Task.Run(() => host!.StopAsync(CancellationToken.None)));
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+        };
+
+        await using var rig = this.Build(topic, topicOptions, WorkQueueOptions(topic), consumer, handler);
+        host = rig.Host;
+        await host.StartAsync(CancellationToken.None);
+
+        var stopping = await stopStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await stopping.WaitAsync(TimeSpan.FromSeconds(60));
+
+        var pending = await fixture.Db.StreamPendingAsync(StreamKeys.Stream(topic, 0), consumer);
+        var handled = handler.Count;
+
+        // Whatever the handler completed is acknowledged; nothing it finished is left pending.
+        pending.PendingMessageCount.Should().Be(0, "a batch whose handler returned is acknowledged before stop");
+        handled.Should().BeGreaterThan(0);
+    }
+
+    /// <summary>
+    /// R-29 — the other half: a batch the stop interrupted mid-handler (the handler observed the
+    /// cancellation and threw) is NOT acknowledged and stays pending for redelivery.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task S18_Work_queue_leaves_a_batch_interrupted_by_stop_pending()
+    {
+        await this.ResetAsync();
+
+        var topic = fixture.NewTopic();
+        var consumer = fixture.NewConsumer();
+        var topicOptions = new TopicOptions { Partitions = 1 };
+        var publisher = new StreamPublisher(fixture.Db, topic, topicOptions);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await publisher.PublishAsync("k", Utf8($"m{i}"), MessageType, new PublishOptions(Partition: 0));
+        }
+
+        var handler = new TestHandler();
+        handler.OnBatch = (_, ct) => new ValueTask(Task.Delay(Timeout.Infinite, ct));
+
+        await using var rig = this.Build(topic, topicOptions, WorkQueueOptions(topic), consumer, handler);
+        await rig.Host.StartAsync(CancellationToken.None);
+        await handler.WaitForAsync(1, TimeSpan.FromSeconds(30));
+        await rig.Host.StopAsync(CancellationToken.None);
+
+        var pending = await fixture.Db.StreamPendingAsync(StreamKeys.Stream(topic, 0), consumer);
+
+        pending.PendingMessageCount.Should().Be(3, "the interrupted batch was never handled, so it stays pending");
+    }
+
+    private static ConsumerOptions WorkQueueOptions(string topic) => new()
+    {
+        Topic = topic,
+        BatchSize = 10,
+        Delivery = DeliveryMode.WorkQueue,
+        Instances = new InstanceOptions { Mode = InstanceMode.Static },
+    };
+
+    /// <summary>
     /// S18b — <c>XAUTOCLAIM</c> recovers entries an instance was delivered and then abandoned
     /// mid-batch, which is the only reason to pay for consumer-group mode in the first place.
     /// </summary>
