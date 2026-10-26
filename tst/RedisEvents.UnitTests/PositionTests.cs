@@ -834,7 +834,8 @@ public class PositionTests
         var markers = ResetMarkers.Read(entries);
 
         markers.Should().ContainSingle();
-        markers[1].Should().Be(new ResetMarker(1, Id(8, 1), DateTimeOffset.UnixEpoch));
+        markers[1].Raw.Should().Be(StreamAdmin.FormatResetMarker(Id(8, 1), DateTimeOffset.UnixEpoch), "the exact stored value is kept for the compare-and-delete");
+        (markers[1] with { Raw = null }).Should().Be(new ResetMarker(1, Id(8, 1), DateTimeOffset.UnixEpoch));
 
         // The same hash read as positions must see the position and none of the markers.
         var positions = RedisPositionStore.Read(entries);
@@ -1483,6 +1484,15 @@ public class PositionTests
 
                     return Task.FromResult(this.HashDelete(Key(args[0]), dead));
 
+                case "ScriptEvaluateAsync" when args.Length >= 3 && args[1] is RedisKey[] scriptKeys && args[2] is RedisValue[] pairs:
+                    // The reset marker compare-and-delete: (field, expected value) pairs.
+                    if (this.FailDeletes)
+                    {
+                        return Task.FromException<RedisResult>(new RedisConnectionException(ConnectionFailureType.SocketFailure, "injected"));
+                    }
+
+                    return Task.FromResult(this.CompareAndDelete(scriptKeys[0].ToString()!, pairs));
+
                 case "HashSetAsync" when args.Length == 3 && args[1] is HashEntry[] entries:
                     this.HashSet(Key(args[0]), entries);
                     return Task.CompletedTask;
@@ -1531,6 +1541,30 @@ public class PositionTests
                 }
 
                 return entries;
+            }
+        }
+
+        private RedisResult CompareAndDelete(string key, RedisValue[] pairs)
+        {
+            lock (this.gate)
+            {
+                long removed = 0;
+
+                if (this.hashes.TryGetValue(key, out var hash))
+                {
+                    for (var i = 0; i + 1 < pairs.Length; i += 2)
+                    {
+                        var field = pairs[i].ToString()!;
+
+                        if (hash.TryGetValue(field, out var value) && value == pairs[i + 1].ToString() && hash.Remove(field))
+                        {
+                            removed++;
+                            this.Deletes++;
+                        }
+                    }
+                }
+
+                return RedisResult.Create((RedisValue)removed);
             }
         }
 
