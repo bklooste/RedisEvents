@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using RedisEvents.Admin;
 using RedisEvents.Consumer;
 using RedisEvents.Diagnostics;
 using RedisEvents.Ownership;
@@ -132,6 +133,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private readonly int[] resetPartitions;
     private readonly RedisValue[] resetFields;
     private readonly RedisValue[] resetClearFields;
+    private readonly RedisValue[] resetClearValues;
     private readonly ResetMarker[] resetBuffer;
     private readonly int resetPollTicks;
 
@@ -311,6 +313,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
         this.resetPartitions = this.resets is null ? [] : this.resets.Partitions.ToArray();
         this.resetFields = this.resets is null ? [] : ResetMarkers.Fields(this.resetPartitions);
         this.resetClearFields = new RedisValue[this.resetPartitions.Length];
+        this.resetClearValues = new RedisValue[this.resetPartitions.Length];
         this.resetBuffer = new ResetMarker[this.resetPartitions.Length];
 
         // Re-arbitration rides the same timer as everything else: a whole tick is the smallest unit
@@ -1227,13 +1230,21 @@ internal sealed class PositionFlusher : IAsyncDisposable
             return;
         }
 
+        // Remember the exact marker taken per partition: the delete compares against its raw value,
+        // and the slot is cleared only if it is still taken for that same marker (R-28).
         var clear = 0;
+        var taken = new ResetMarker[this.resetPartitions.Length];
+        var takenAt = new bool[this.resetPartitions.Length];
 
         for (var i = 0; i < this.resetPartitions.Length; i++)
         {
-            if (signal.IsTaken(this.resetPartitions[i]))
+            if (signal.TryGetTaken(this.resetPartitions[i], out var marker))
             {
-                this.resetClearFields[clear++] = this.resetFields[i];
+                taken[i] = marker;
+                takenAt[i] = true;
+                this.resetClearFields[clear] = this.resetFields[i];
+                this.resetClearValues[clear++] = marker.Raw
+                    ?? StreamAdmin.FormatResetMarker(marker.Target, marker.IssuedUtc);
             }
         }
 
@@ -1242,7 +1253,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
             return;
         }
 
-        await ResetMarkers.ClearAsync(db, this.key, this.resetClearFields, clear).ConfigureAwait(false);
+        await ResetMarkers.ClearIfUnchangedAsync(db, this.key, this.resetClearFields, this.resetClearValues, clear).ConfigureAwait(false);
 
         // Only now that the field is gone: clearing the slot first would let the next tick see the
         // same marker again and rewind the reader a second time.
@@ -1250,7 +1261,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
         {
             var partition = this.resetPartitions[i];
 
-            if (signal.TryClearTaken(partition, out var applied))
+            if (takenAt[i] && signal.TryClearTaken(partition, taken[i], out var applied))
             {
                 // Rewind() already ran on the read loop's thread when it took this reset (see
                 // Rewind's remarks); this only deletes the now-safe-to-clear marker field and

@@ -33,7 +33,11 @@ internal delegate void ResetSeek(StreamId after);
 /// <param name="Target">The id to restart after — same exclusive sense as a stored position.</param>
 /// <param name="IssuedUtc">When the reset was issued, or <see cref="DateTimeOffset.MinValue"/> when
 /// the marker carried no time.</param>
-internal readonly record struct ResetMarker(int Partition, StreamId Target, DateTimeOffset IssuedUtc);
+/// <param name="Raw">The exact hash value this marker was parsed from, or <see langword="null"/> for a
+/// marker built in memory. Kept so the flusher can delete the field only while it still holds this
+/// exact string (see <see cref="ResetMarkers.ClearIfUnchangedAsync"/>): a newer reset for the same
+/// partition rewrites the field, and a plain delete would take that newer instruction with it.</param>
+internal readonly record struct ResetMarker(int Partition, StreamId Target, DateTimeOffset IssuedUtc, string? Raw = null);
 
 /// <summary>
 /// The hand-off between the flusher tick, which notices a reset marker in Redis, and a running read
@@ -209,6 +213,41 @@ internal sealed class ResetSignal
     /// <returns><see langword="true"/> when a taken reset was cleared — i.e. its marker is now safe to
     /// delete. <see langword="false"/> when the slot is empty or still waiting to be taken.</returns>
     internal bool TryClearTaken(int partition, out ResetMarker marker)
+        => this.TryClearTaken(partition, expected: null, out marker);
+
+    /// <summary>
+    /// The marker a partition's slot holds in the taken state, if it does.
+    /// </summary>
+    /// <param name="partition">The partition.</param>
+    /// <param name="marker">The taken marker, when this returns <see langword="true"/>.</param>
+    /// <returns><see langword="true"/> when the slot is taken.</returns>
+    internal bool TryGetTaken(int partition, out ResetMarker marker)
+    {
+        marker = default;
+
+        var slot = this.IndexOf(partition);
+
+        if (slot >= 0 && Volatile.Read(ref this.slots[slot]) is { Taken: true } current)
+        {
+            marker = current.Marker;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Clears a taken slot only while it is still taken for <paramref name="expected"/> (R-28's
+    /// in-memory half). Without the check, a newer reset that was requested <em>and taken</em> while
+    /// the old marker's delete was in flight would be cleared here, though its field was never deleted
+    /// and the slot would forget a reset still stored in Redis.
+    /// </summary>
+    /// <param name="partition">The partition.</param>
+    /// <param name="expected">The marker whose field was deleted, or <see langword="null"/> to clear
+    /// whatever is taken.</param>
+    /// <param name="marker">The marker that was applied, when this returns <see langword="true"/>.</param>
+    /// <returns><see langword="true"/> when the slot was cleared.</returns>
+    internal bool TryClearTaken(int partition, ResetMarker? expected, out ResetMarker marker)
     {
         marker = default;
 
@@ -220,7 +259,7 @@ internal sealed class ResetSignal
 
         var current = Volatile.Read(ref this.slots[slot]);
 
-        if (current is null || !current.Taken)
+        if (current is null || !current.Taken || (expected is { } want && current.Marker != want))
         {
             return false;
         }
@@ -330,7 +369,7 @@ internal static class ResetMarkers
             return false;
         }
 
-        marker = new ResetMarker(partition, target, issued);
+        marker = new ResetMarker(partition, target, issued, text);
         return true;
     }
 
@@ -387,6 +426,52 @@ internal static class ResetMarkers
 
         return db.HashDeleteAsync(key, slice);
     }
+
+    /// <summary>
+    /// Compare-and-delete: removes each marker field only if it still holds the exact value that was
+    /// taken, atomically, in one round trip.
+    /// </summary>
+    /// <param name="db">The shared multiplexer's database.</param>
+    /// <param name="key">The positions hash key.</param>
+    /// <param name="fields">Field names, index-aligned with <paramref name="values"/>.</param>
+    /// <param name="values">The exact values observed when the resets were taken.</param>
+    /// <param name="count">How many leading entries to process.</param>
+    /// <returns>A task that completes when the script has run.</returns>
+    /// <remarks>
+    /// <b>Why not HDEL (R-28).</b> An operator can issue a newer reset for the same partition between
+    /// the read loop taking the old marker and the flusher deleting it. The admin write replaces the
+    /// field's value, so a plain HDEL removes the newer instruction and that reset is silently lost.
+    /// A field whose value changed is left alone; the next poll finds it and applies it as a fresh
+    /// reset. A field already gone is a no-op, so retries are safe.
+    /// </remarks>
+    internal static Task ClearIfUnchangedAsync(IDatabase db, RedisKey key, RedisValue[] fields, RedisValue[] values, int count)
+    {
+        if (count <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        var args = new RedisValue[count * 2];
+
+        for (var i = 0; i < count; i++)
+        {
+            args[i * 2] = fields[i];
+            args[(i * 2) + 1] = values[i];
+        }
+
+        return db.ScriptEvaluateAsync(DeleteIfUnchangedScript, [key], args);
+    }
+
+    private const string DeleteIfUnchangedScript = """
+        local removed = 0
+        for i = 1, #ARGV, 2 do
+          if redis.call('HGET', KEYS[1], ARGV[i]) == ARGV[i + 1] then
+            redis.call('HDEL', KEYS[1], ARGV[i])
+            removed = removed + 1
+          end
+        end
+        return removed
+        """;
 
     /// <summary>
     /// The cold path: reads every marker on a consumer's position hash, clears them, and hands them

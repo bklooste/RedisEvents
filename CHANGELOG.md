@@ -8,6 +8,13 @@ actually changed.
 
 ### Fixed
 
+- **A newer reset can no longer be lost to the flusher deleting the older marker it replaced (R-28).**
+  The position flusher removed a taken `__reset:<p>` field with a plain `HDEL`, so a newer reset issued
+  for the same partition between the read loop taking the old marker and the delete (on the poll tick
+  or in the final flush on stop) was deleted with it. The delete is now a Lua compare-and-delete
+  against the exact value that was taken, and the in-memory slot is cleared only while it is still
+  taken for that same marker. The newer marker stays in Redis and is applied on the next poll. Marker
+  deletion still precedes any post-rewind position write.
 - **`BufferedStreamPublisher` no longer reorders one partition key on a cold publisher's first flush.**
   Each pipelined publish awaited the lazy topic reconcile separately and the continuations raced, so
   XADDs for one key could reach Redis out of order, against the per-key ordering the docs promise. The
