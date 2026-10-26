@@ -466,7 +466,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// <returns>A task that completes when the write has landed or has failed and been re-queued.</returns>
     internal async ValueTask FlushAsync(CancellationToken ct = default)
     {
-        if (Volatile.Read(ref this.dirtyCount) == 0)
+        var anyTaken = this.resets is { } signal && signal.AnyTaken();
+
+        if (Volatile.Read(ref this.dirtyCount) == 0 && !anyTaken)
         {
             return;
         }
@@ -476,6 +478,13 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
         try
         {
+            // Every flush, the final one at shutdown included, deletes the markers of resets a read
+            // loop has already taken BEFORE it writes any position. See ClearTakenMarkersAsync.
+            if (anyTaken)
+            {
+                await this.ClearTakenMarkersAsync().ConfigureAwait(false);
+            }
+
             count = this.Drain();
             if (count == 0)
             {
@@ -541,6 +550,16 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
             if (Volatile.Read(ref this.stopped[partition]) != 0)
             {
+                continue;
+            }
+
+            // A partition whose reset is taken but whose marker is still stored: its post-rewind
+            // position must not reach Redis yet. Written first, a crash would leave the marker next
+            // to a position that already includes the replay, and the next start would rewind a
+            // second time. Stays dirty, so the flush after the marker is gone writes it.
+            if (this.resets is { } held && held.IsTaken(partition))
+            {
+                this.MarkDirty(partition);
                 continue;
             }
 
@@ -1179,6 +1198,78 @@ internal sealed class PositionFlusher : IAsyncDisposable
     }
 
     /// <summary>
+    /// Deletes the marker fields of every reset a read loop has taken, then clears their slots.
+    /// Throws if the delete fails, in which case every slot stays taken and the caller retries.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this runs at the head of every flush, not only on the poll tick.</b> A taken marker is
+    /// harmless only while no position newer than the rewind is stored beside it: the next start
+    /// applies the marker, and the position it overrides is the pre-reset one. Once the post-rewind
+    /// position is written with the marker still present, a restart rewinds again and replays
+    /// everything processed since. Shutdown made that likely, because <see cref="StopAsync"/> flushed
+    /// positions but the marker was normally only deleted on the next tick, which never came.
+    /// </para>
+    /// <para>
+    /// So the order is fixed: marker deleted, slot cleared, and only then does <see cref="Drain"/>
+    /// release the partition's position (it holds a taken partition back, see there). A crash at any
+    /// point leaves either the marker with the reset target still stored, so the reset applies once
+    /// more and nothing past it was persisted, or no marker. Never a marker beside a newer position.
+    /// </para>
+    /// </remarks>
+    private async ValueTask ClearTakenMarkersAsync()
+    {
+        var signal = this.resets;
+        var db = this.redis?.GetDatabase();
+
+        if (signal is null || db is null)
+        {
+            return;
+        }
+
+        var clear = 0;
+
+        for (var i = 0; i < this.resetPartitions.Length; i++)
+        {
+            if (signal.IsTaken(this.resetPartitions[i]))
+            {
+                this.resetClearFields[clear++] = this.resetFields[i];
+            }
+        }
+
+        if (clear == 0)
+        {
+            return;
+        }
+
+        await ResetMarkers.ClearAsync(db, this.key, this.resetClearFields, clear).ConfigureAwait(false);
+
+        // Only now that the field is gone: clearing the slot first would let the next tick see the
+        // same marker again and rewind the reader a second time.
+        for (var i = 0; i < this.resetPartitions.Length; i++)
+        {
+            var partition = this.resetPartitions[i];
+
+            if (signal.TryClearTaken(partition, out var applied))
+            {
+                // Rewind() already ran on the read loop's thread when it took this reset (see
+                // Rewind's remarks); this only deletes the now-safe-to-clear marker field and
+                // counts the reset as applied.
+                Interlocked.Increment(ref this.resetsApplied);
+
+                // Information, not Warning: the reset itself was already warned about, twice, here
+                // when it was noticed and in the read loop when it actually rewound.
+                this.log?.LogInformation(
+                    "Streams: reset marker cleared for topic {Topic} consumer {Consumer} partition {Partition}; reads restarted after {Target}.",
+                    this.topic,
+                    this.consumer,
+                    partition,
+                    applied.Target.Format());
+            }
+        }
+    }
+
+    /// <summary>
     /// The reset-marker tick: notice markers, hand them to the read loops, and delete the ones a read
     /// loop has already acted on. Never throws.
     /// </summary>
@@ -1240,46 +1331,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
                     marker.IssuedUtc.ToString("O", CultureInfo.InvariantCulture));
             }
 
-            var clear = 0;
-
-            for (var i = 0; i < this.resetPartitions.Length; i++)
-            {
-                if (signal.IsTaken(this.resetPartitions[i]))
-                {
-                    this.resetClearFields[clear++] = this.resetFields[i];
-                }
-            }
-
-            if (clear == 0)
-            {
-                return;
-            }
-
-            await ResetMarkers.ClearAsync(db, this.key, this.resetClearFields, clear).ConfigureAwait(false);
-
-            // Only now that the field is gone: clearing the slot first would let the next tick see the
-            // same marker again and rewind the reader a second time.
-            for (var i = 0; i < this.resetPartitions.Length; i++)
-            {
-                var partition = this.resetPartitions[i];
-
-                if (signal.TryClearTaken(partition, out var applied))
-                {
-                    // Rewind() already ran on the read loop's thread when it took this reset (see
-                    // Rewind's remarks) — this tick only deletes the now-safe-to-clear marker field
-                    // and counts the reset as applied.
-                    Interlocked.Increment(ref this.resetsApplied);
-
-                    // Information, not Warning: the reset itself was already warned about, twice —
-                    // here when it was noticed, and in the read loop when it actually rewound.
-                    this.log?.LogInformation(
-                        "Streams: reset marker cleared for topic {Topic} consumer {Consumer} partition {Partition}; reads restarted after {Target}.",
-                        this.topic,
-                        this.consumer,
-                        partition,
-                        applied.Target.Format());
-                }
-            }
+            await this.ClearTakenMarkersAsync().ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

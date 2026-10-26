@@ -25,6 +25,13 @@ actually changed.
     the failing message instead of replaying the earlier ones.
   - `StopPartition` and `Fail` leave the position at the message before the failing one.
   - Batch handlers (`IBatchHandler`) are unchanged: an exception still applies to the whole batch.
+- **A reset taken just before shutdown is no longer applied again on the next start.** When a read
+  loop took a live reset and the host stopped before the flusher's next tick, `PositionFlusher.StopAsync`
+  flushed the post-rewind position but left the `__reset:<p>` marker in Redis, so the restart rewound
+  again and replayed everything processed since. Every flush, the final one included, now deletes the
+  markers of taken resets first, and a taken partition's post-rewind position is held back until its
+  marker is gone. A crash leaves either the marker with the reset target still stored (the reset applies
+  once more and nothing past it was persisted) or no marker; never a marker beside a newer position.
 
 ## 2026-10-21
 
