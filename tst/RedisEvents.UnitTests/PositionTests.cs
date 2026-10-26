@@ -560,7 +560,8 @@ public class PositionTests
             resets: signal);
 
         flusher.Start();
-        await Task.Delay(150);
+        await Wait(() => signal.HasPending, "the flusher picked the marker up");
+        await Task.Delay(150); // many more ticks, none of which may delete an untaken marker
 
         redis.Get(key, StreamAdmin.ResetMarkerField(0)).Should().NotBeNull(
             "a reader parked in a blocking XREAD must not lose the reset");
