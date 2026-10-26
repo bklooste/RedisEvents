@@ -426,19 +426,18 @@ public class ProcessBatchAccountingTests
 public class BlockFetchSlotTests
 {
     /// <summary>
-    /// A reply carrying a stream this worker never asked for is never attributed to a requested slot
-    /// when the reply holds other streams too.
+    /// A reply carrying a stream this worker never asked for is refused, alone or beside others.
     /// </summary>
     /// <remarks>
-    /// <c>SlotOf</c> ended with "one key was requested, so an unmatched key must be it" — a rule that
-    /// is only sound for a <em>single-stream</em> reply (a key prefix on the connection rewrites the
-    /// key text, which is why the rule exists at all). Applied per stream of a multi-stream reply it
-    /// records a foreign stream's last id as this partition's position, which silently skips
-    /// everything between. The single-stream case still resolves, because that one really is ours.
+    /// <c>SlotOf</c> once ended with "one key was requested, so an unmatched key must be it", and a
+    /// later fix kept that rescue for single-stream replies on the theory that a key prefix rewrites
+    /// the key text. Nothing rewrites keys on the library's own reader connection; what produces a
+    /// foreign key is a desynchronised connection handing this read another read's reply. Refusing it
+    /// is what lets the read loop rebuild the connection instead of recording a foreign stream's ids.
     /// </remarks>
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public void An_unrequested_key_is_only_claimed_when_it_is_the_only_stream_in_the_reply()
+    public void An_unrequested_key_is_refused_whether_or_not_it_is_the_only_stream()
     {
         RedisKey[] keys = [(RedisKey)"s:t:0"];
         byte[][] keyBytes = [(byte[])(RedisValue)"s:t:0"];
@@ -446,17 +445,11 @@ public class BlockFetchSlotTests
         var mine = BlockFetchReply.Stream("prefixed:s:t:0", "1-0");
         var foreign = BlockFetchReply.Stream("s:other:9", "500-0");
 
-        var alone = BlockFetch.ParseAll(RedisResult.Create([mine]), keys, keyBytes);
+        var alone = () => BlockFetch.ParseAll(RedisResult.Create([mine]), keys, keyBytes);
+        var both = () => BlockFetch.ParseAll(RedisResult.Create([mine, foreign]), keys, keyBytes);
 
-        alone.Should().HaveCount(1);
-        alone[0].Key.Should().Be(keys[0], "a single-stream reply to a single-key read is that key, prefix or not");
-
-        var both = BlockFetch.ParseAll(RedisResult.Create([mine, foreign]), keys, keyBytes);
-
-        both.Should().HaveCount(2);
-        both.Should().OnlyContain(
-            slice => slice.Key != keys[0],
-            "neither of two unmatched streams can be claimed as the requested one");
+        alone.Should().Throw<RedisEvents.Errors.StreamTransportException>();
+        both.Should().Throw<RedisEvents.Errors.StreamTransportException>();
     }
 }
 

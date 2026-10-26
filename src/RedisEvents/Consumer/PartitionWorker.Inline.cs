@@ -68,13 +68,14 @@ internal static partial class PartitionWorker
         PositionFlush? flush = null,
         ResetSignal? resets = null,
         ResetSeek? seek = null,
-        Action<int>? rewind = null)
+        Action<int>? rewind = null,
+        ReaderRebuild? rebuildReader = null)
     {
         // Copied out of the `in` parameter so the loop's state machine can hold it.
         var local = ctx;
 
         return ReadInlineLoopAsync(
-            local, from, fetch, handler, positions, ct, hopToThreadPool, persist, flush, resets, seek, rewind);
+            local, from, fetch, handler, positions, ct, hopToThreadPool, persist, flush, resets, seek, rewind, rebuildReader);
     }
 
     /// <summary>
@@ -93,7 +94,8 @@ internal static partial class PartitionWorker
         PositionFlush? flush = null,
         ResetSignal? resets = null,
         ResetSeek? seek = null,
-        Action<int>? rewind = null)
+        Action<int>? rewind = null,
+        ReaderRebuild? rebuildReader = null)
     {
         ArgumentNullException.ThrowIfNull(fetch);
         ArgumentNullException.ThrowIfNull(handler);
@@ -135,6 +137,16 @@ internal static partial class PartitionWorker
                 }
                 catch (Exception ex) when (IsTransientTransportFailure(ex) && !ct.IsCancellationRequested)
                 {
+                    if (await RebuildPoisonedReaderAsync(ctx, ex, rebuildReader, ct).ConfigureAwait(false)
+                        && seek is not null
+                        && ctx.Monitor is { } recorded)
+                    {
+                        var resume = recorded.Position;
+                        rewind?.Invoke(ctx.Partition);
+                        seek(resume);
+                        LogResume(in ctx, resume);
+                    }
+
                     outage = await WaitOutTransportFailureAsync(ctx, ex, outage, ct).ConfigureAwait(false);
                     continue;
                 }
@@ -201,7 +213,8 @@ internal static partial class PartitionWorker
         PersistMode persist = PersistMode.AsyncBatch,
         PositionFlush? flush = null,
         ResetSignal? resets = null,
-        Action<int>? rewind = null)
+        Action<int>? rewind = null,
+        ReaderRebuild? rebuildReader = null)
     {
         ArgumentNullException.ThrowIfNull(partitions);
         ArgumentNullException.ThrowIfNull(from);
@@ -292,6 +305,11 @@ internal static partial class PartitionWorker
                         {
                             partitions[i].Monitor?.MarkTransportBlocked();
                         }
+                    }
+
+                    if (await RebuildPoisonedReaderAsync(partitions[0], ex, rebuildReader, ct).ConfigureAwait(false))
+                    {
+                        ResumeFromRecorded(partitions, cursors, retired: null, rewind);
                     }
 
                     outage = await WaitOutTransportFailureAsync(partitions[0], ex, outage, ct).ConfigureAwait(false);

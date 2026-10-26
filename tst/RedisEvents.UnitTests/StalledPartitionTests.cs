@@ -393,6 +393,140 @@ public sealed class UnreadableReplyTests : IDisposable
         StreamStatus.Snapshot(monitor).StalledMs.Should().Be(0);
     }
 
+    /// <summary>
+    /// An untrusted reply on the reader rebuilds the reader connection — once — and the loop resumes
+    /// from the position its handler last recorded, not from anything the bad reply said.
+    /// </summary>
+    [Fact]
+    public async Task An_untrusted_reply_rebuilds_the_reader_and_resumes_from_the_recorded_position()
+    {
+        PartitionWorker.BlockDelay = static (_, ct) => Task.Delay(1, ct);
+
+        var monitor = StreamLag.Track("t", "c", 0, (RedisKey)"s:t:0", unhealthyStalledSeconds: 300);
+        var channel = PartitionWorker.CreateChannel(4);
+        var ctx = Pipeline.Context(channel.Writer) with { Monitor = monitor };
+        var calls = 0;
+        var rebuilds = new List<string>();
+        var seeks = new List<StreamId>();
+        var rewinds = new List<int>();
+        var handled = new List<string>();
+
+        ValueTask<StreamEntryBatch> Fetch(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            return Interlocked.Increment(ref calls) switch
+            {
+                1 => new(Pipeline.Batch(Pipeline.Entry(1, 0, "Keep", "a"), Pipeline.Entry(1, 1, "Keep", "b"))),
+                2 => WaitThenThrow(),
+                3 => new(Pipeline.Batch(Pipeline.Entry(2, 0, "Keep", "c"))),
+                _ => Park(ct),
+            };
+
+            async ValueTask<StreamEntryBatch> WaitThenThrow()
+            {
+                // Only once the first batch is recorded, so the resume point is known.
+                await Pipeline.WaitFor(() => monitor.LastProcessed == new StreamId(1, 1), "the first batch to be recorded");
+                throw new StreamTransportException("the reply carried stream key 's:t:1', which was not requested");
+            }
+        }
+
+        ValueTask<bool> Rebuild(string reason, CancellationToken ct)
+        {
+            lock (rebuilds)
+            {
+                rebuilds.Add(reason);
+            }
+
+            return new(true);
+        }
+
+        using var cts = new CancellationTokenSource();
+        var read = PartitionWorker.ReadLoopAsync(
+            ctx,
+            StreamId.Min,
+            Fetch,
+            cts.Token,
+            seek: id => seeks.Add(id),
+            rewind: p => rewinds.Add(p),
+            rebuildReader: Rebuild);
+
+        var process = Task.Run(() => PartitionWorker.ProcessLoopAsync(
+            ctx,
+            (batch, _) =>
+            {
+                lock (handled)
+                {
+                    foreach (var msg in batch.Span)
+                    {
+                        handled.Add(Encoding.UTF8.GetString(msg.Body.Span));
+                    }
+                }
+
+                return default;
+            },
+            static (_, _) => { },
+            cts.Token,
+            channel.Reader));
+
+        await Pipeline.WaitFor(
+            () =>
+            {
+                lock (handled)
+                {
+                    return handled.Count == 3;
+                }
+            },
+            "the batch after the untrusted reply to be handled");
+
+        read.IsFaulted.Should().BeFalse();
+        rebuilds.Should().ContainSingle().Which.Should().Contain("not requested");
+        seeks.Should().Equal([new StreamId(1, 1)], "the loop resumes from the recorded position, not from the bad reply");
+        rewinds.Should().Equal([0], "the flusher is told a replay is coming, as for a reset");
+        handled.Should().Equal("a", "b", "c");
+
+        await cts.CancelAsync();
+        await read;
+        await process;
+    }
+
+    /// <summary>A timeout is a plain transport blip: no rebuild, no resume.</summary>
+    [Fact]
+    public async Task A_timeout_does_not_rebuild_the_reader()
+    {
+        PartitionWorker.BlockDelay = static (_, ct) => Task.Delay(1, ct);
+
+        var channel = PartitionWorker.CreateChannel(4);
+        var ctx = Pipeline.Context(channel.Writer);
+        var calls = 0;
+        var rebuilds = 0;
+
+        ValueTask<StreamEntryBatch> Fetch(CancellationToken ct)
+            => Interlocked.Increment(ref calls) switch
+            {
+                1 => throw new RedisTimeoutException("timed out", CommandStatus.Sent),
+                2 => new(Pipeline.Batch(Pipeline.Entry(1, 0, "Keep", "a"))),
+                _ => Park(ct),
+            };
+
+        using var cts = new CancellationTokenSource();
+        var read = PartitionWorker.ReadLoopAsync(
+            ctx, StreamId.Min, Fetch, cts.Token,
+            rebuildReader: (_, _) =>
+            {
+                Interlocked.Increment(ref rebuilds);
+                return new(true);
+            });
+
+        var batch = await channel.Reader.ReadAsync(TestContext.Current.CancellationToken);
+        batch.Return();
+
+        rebuilds.Should().Be(0);
+
+        await cts.CancelAsync();
+        await read;
+    }
+
     private static async ValueTask<StreamEntryBatch> Park(CancellationToken ct)
     {
         await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false);
@@ -443,6 +577,26 @@ public sealed class BlockFetchGarbledReplyTests
         var parse = () => BlockFetch.Parse(reply, Bytes("s:t:0"));
 
         parse.Should().Throw<StreamTransportException>().WithMessage("*field value arrived as an array*");
+    }
+
+    /// <summary>
+    /// A reply whose ids do not run strictly after the cursor that was sent did not answer this read:
+    /// on a slipped connection it is the reply to an older read of the same key.
+    /// </summary>
+    [Fact]
+    public void Ids_that_are_not_after_the_cursor_sent_are_a_malformed_reply()
+    {
+        StreamEntry[] older = [new("5-0", []), new("6-0", [])];
+        StreamEntry[] descending = [new("11-0", []), new("10-5", [])];
+        StreamEntry[] good = [new("10-1", []), new("11-0", [])];
+
+        var replay = () => BlockFetch.ValidateIds(older, "10-0");
+        var shuffled = () => BlockFetch.ValidateIds(descending, "10-0");
+        var fine = () => BlockFetch.ValidateIds(good, "10-0");
+
+        replay.Should().Throw<StreamTransportException>().WithMessage("*5-0 is not after 10-0*");
+        shuffled.Should().Throw<StreamTransportException>().WithMessage("*10-5 is not after 11-0*");
+        fine.Should().NotThrow();
     }
 
     [Fact]

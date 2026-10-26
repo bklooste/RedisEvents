@@ -895,6 +895,26 @@ That is how one pod held both partitions of a topic for four hours after an out-
 Choose N longer than the slowest batch the handler can legitimately take. Detection takes between N
 and N + 1 seconds.
 
+### Which replies are trusted, and how
+
+RESP has no request/response correlation. If a connection's replies ever slip against its requests —
+StackExchange.Redis says it can happen and "may not be noticed immediately" — every later reply lands on
+the wrong command. The library guards each kind of traffic in proportion:
+
+| Traffic | Connection | Guard |
+|---|---|---|
+| Partition ownership: lease script, presence, quarantine, release, the flusher's reads of the ownership hash | its own, cloned from the shared one, `highIntegrity` **on** | every reply checksum-verified; a mismatch reconnects. A few commands a second, so the ECHO per command costs nothing |
+| `XREAD` (`ReadMode.Block`) | the dedicated reader, `highIntegrity` **off** | every reply validated: requested keys only, ids strictly after the cursor sent and ascending, scalars where scalars belong. A failure rebuilds the reader and resumes from the recorded position |
+| Publishes, position writes, reset markers, admin, lag sampling | the shared connection, as you configured it | none added — an ECHO per publish is not worth it, and a misreported position write costs at most a redelivery |
+
+The `XREAD` validation is enough because the reply describes itself: it names the stream key and every
+entry id, so a reply meant for another read (another partition's, or this one's from an older cursor)
+fails it, and the position the loop resumes from comes from what the handler recorded, never from the
+bad reply. What it cannot catch: a slipped reply that is indistinguishable from the right one — a repeat
+of the same key and cursor, which carries the same entries and is harmless — and a desync on the
+shared connection, where publishes and position writes are not verified (a misreported write shows up
+as a redelivery after a restart, and the stall rule fires on positions that keep failing).
+
 ### Reading the signals yourself
 
 `StreamStatus.Partitions()` is the snapshot `StreamHealth` grades, for a host that wants its own

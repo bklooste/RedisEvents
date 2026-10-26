@@ -51,6 +51,19 @@ internal static partial class StreamNames
     }
 
     /// <summary>
+    /// The Redis client name of a consumer's dedicated high-integrity ownership connection:
+    /// <c>streams-own:&lt;service&gt;:&lt;consumer&gt;:&lt;pod&gt;</c>.
+    /// </summary>
+    public static string OwnershipClientName(string service, string consumer, string podName)
+    {
+        var service_s = Sanitise(service);
+        var consumer_s = Sanitise(consumer);
+        var pod_s = Sanitise(podName);
+        var formatted = $"streams-own:{service_s}:{consumer_s}:{pod_s}";
+        return Truncate(formatted);
+    }
+
+    /// <summary>
     /// Builds the hosted service task name for a consumer host.
     /// Format: streams-host:{consumer}
     /// </summary>

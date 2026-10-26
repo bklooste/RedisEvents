@@ -137,16 +137,22 @@ public class BlockFetchParseTests
     }
 
     /// <summary>
-    /// A single-stream reply is accepted whatever its key text says: a key prefix configured on the
-    /// connection rewrites the key on the wire, and one key was requested, so it can only be ours.
+    /// A single-stream reply whose key is not the one requested is refused. It used to be accepted
+    /// "whatever its key text says", for a key prefix the connection might add — but the reader
+    /// connection is the library's own, nothing rewrites its keys, and Redis echoes the key exactly
+    /// as sent. A foreign key is what desync produces: non-co-located partitions share the reader, so
+    /// a slipped reply is typically another partition's, and taking it would record that partition's
+    /// ids as this one's cursor.
     /// </summary>
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public void A_single_stream_reply_is_accepted_even_when_the_key_text_differs()
+    public void A_single_stream_reply_for_another_key_is_refused()
     {
         var reply = Reply.Array(Reply.Resp2Stream("prefix:s:t:0", Reply.Array(Reply.Entry("4-0", ("b", "x")))));
 
-        BlockFetch.Parse(reply, Bytes("s:t:0")).Count.Should().Be(1);
+        var act = () => BlockFetch.Parse(reply, Bytes("s:t:0"));
+
+        act.Should().Throw<StreamTransportException>().WithMessage("*none of them the one that was requested*");
     }
 
     /// <summary>
@@ -332,13 +338,13 @@ public class BlockFetchParseTests
     }
 
     /// <summary>
-    /// When several keys were requested there is no single-stream rescue to fall back on, so an
-    /// unmatched key is carried through with the key exactly as it arrived rather than being
-    /// attributed to one of the requested slots.
+    /// A reply carrying a key that was not requested is refused outright, never attributed to a
+    /// requested slot and no longer carried through for the loop to warn about: Redis answers with
+    /// exactly the keys it was asked for, so such a reply belongs to another read.
     /// </summary>
     [Fact]
     [Trait("TestType", "UnitTest")]
-    public void ParseAll_never_attributes_an_unmatched_key_to_a_requested_slot()
+    public void ParseAll_refuses_a_reply_carrying_an_unrequested_key()
     {
         RedisKey[] keys = [(RedisKey)"s:t:0", (RedisKey)"s:t:1"];
         byte[][] keyBytes = [Bytes("s:t:0"), Bytes("s:t:1")];
@@ -347,12 +353,9 @@ public class BlockFetchParseTests
             Reply.Resp2Stream("s:t:0", Reply.Array(Reply.Entry("1-0", ("b", "mine")))),
             Reply.Resp2Stream("s:elsewhere:4", Reply.Array(Reply.Entry("999-0", ("b", "foreign")))));
 
-        var slices = BlockFetch.ParseAll(reply, keys, keyBytes);
+        var act = () => BlockFetch.ParseAll(reply, keys, keyBytes);
 
-        slices.Should().HaveCount(2);
-        slices[0].Key.Should().Be(keys[0]);
-        slices[1].Key.Should().Be((RedisKey)"s:elsewhere:4", "the foreign key is reported as it arrived, so the loop can warn");
-        slices[1].Key.Should().NotBe(keys[1], "attributing it to partition 1 would record 999-0 as that partition's position");
+        act.Should().Throw<StreamTransportException>().WithMessage("*s:elsewhere:4*not requested*");
     }
 
     /// <summary>

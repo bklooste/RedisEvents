@@ -93,6 +93,13 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
     private readonly IPositionStore store;
     private readonly IConnectionMultiplexer? redis;
+
+    /// <summary>
+    /// The connection the ownership hash is read over for the second-writer checks: the consumer
+    /// host's high-integrity ownership connection, so a desynchronised reply can never be taken for
+    /// who holds a partition. Positions themselves are written over <see cref="redis"/>.
+    /// </summary>
+    private readonly IConnectionMultiplexer? ownershipRedis;
     private readonly RedisKey key;
     private readonly string topic;
     private readonly string consumer;
@@ -261,7 +268,8 @@ internal sealed class PositionFlusher : IAsyncDisposable
         bool exclusiveClaims = false,
         TimeSpan contestedGrace = default,
         PartitionRecoveredCallback? onRecovered = null,
-        TimeSpan? recheckInterval = null)
+        TimeSpan? recheckInterval = null,
+        IConnectionMultiplexer? ownershipRedis = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
@@ -271,6 +279,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
         this.store = store;
         this.redis = redis;
+        this.ownershipRedis = ownershipRedis ?? redis;
         this.topic = topic;
         this.consumer = consumer;
         this.interval = interval;
@@ -801,7 +810,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// <returns>A task that completes once every candidate has been judged.</returns>
     private async ValueTask JudgeAsync(int candidates, CancellationToken ct)
     {
-        var db = this.redis?.GetDatabase();
+        var db = this.ownershipRedis?.GetDatabase();
         if (db is null)
         {
             return;
@@ -960,7 +969,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// </remarks>
     internal async ValueTask RecheckAsync(CancellationToken ct)
     {
-        var db = this.redis?.GetDatabase();
+        var db = this.ownershipRedis?.GetDatabase();
         if (db is null || this.onRecovered is null)
         {
             return;

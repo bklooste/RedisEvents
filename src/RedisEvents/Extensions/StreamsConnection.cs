@@ -90,6 +90,7 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
     private readonly Lock gate = new();
 
     private IConnectionMultiplexer? connection;
+    private ConfigurationOptions? configuration;
     private bool owned;
     private bool disposed;
 
@@ -163,7 +164,7 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
                 if (this.connection is not null)
                     return this.connection;
 
-                this.connection = Resolve(this.services, this.options, this.logger, out var created);
+                this.connection = Resolve(this.services, this.options, this.logger, out var created, out this.configuration);
                 this.owned = created;
 
                 // Only a multiplexer the library created is ours to instrument. A reused one belongs
@@ -192,8 +193,22 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
         StreamOptions options,
         ILogger? logger,
         out bool created)
+        => Resolve(services, options, logger, out created, out _);
+
+    /// <summary>
+    /// <see cref="Resolve(IServiceProvider?, StreamOptions, ILogger?, out bool)"/>, also handing back
+    /// the <see cref="ConfigurationOptions"/> a created multiplexer was connected with (null when an
+    /// existing one was reused), so <see cref="ConnectHighIntegrityAsync"/> can clone it.
+    /// </summary>
+    internal static IConnectionMultiplexer Resolve(
+        IServiceProvider? services,
+        StreamOptions options,
+        ILogger? logger,
+        out bool created,
+        out ConfigurationOptions? configuration)
     {
         ArgumentNullException.ThrowIfNull(options);
+        configuration = null;
 
         var connectionString = StreamConfigBinder.ResolveConnectionString(options);
         var configured = ParseConfiguration(connectionString);
@@ -234,6 +249,7 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
         try
         {
             created = true;
+            configuration = configured;
             return ConnectionMultiplexer.Connect(configured);
         }
         catch (Exception ex)
@@ -243,6 +259,64 @@ internal sealed class StreamsConnectionProvider : IAsyncDisposable, IDisposable
                 $"Check {StreamConfigBinder.SectionName}:ConnectionString (default '{StreamConfigBinder.DefaultConnectionString}').",
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Opens a dedicated connection to the same server as the shared one, with StackExchange.Redis
+    /// <c>highIntegrity</c> on, for the one kind of traffic whose replies must never be trusted
+    /// blindly: partition ownership. Nothing else is routed over it.
+    /// </summary>
+    /// <param name="clientName">The Redis client name to give it.</param>
+    /// <returns>The connection; the caller owns it and disposes it.</returns>
+    /// <remarks>
+    /// <para>
+    /// Its options are a clone of the shared multiplexer's: <see cref="ConfigurationOptions.Clone"/>
+    /// of the options this provider connected with, or, when an <see cref="IConnectionMultiplexer"/>
+    /// from the container was reused, a parse of that multiplexer's own
+    /// <see cref="IConnectionMultiplexer.Configuration"/> (which carries the password). A reused
+    /// multiplexer that cannot describe itself falls back to the Streams connection string, which it
+    /// was matched against. Settings that a configuration string cannot carry — a custom
+    /// certificate callback, a socket manager — are not copied from a reused multiplexer.
+    /// </para>
+    /// <para>
+    /// <c>abortConnect</c> is off, so an unreachable Redis at startup yields a connection that keeps
+    /// retrying, as the ownership registry already expects of Redis failures.
+    /// </para>
+    /// </remarks>
+    internal async Task<IConnectionMultiplexer> ConnectHighIntegrityAsync(string clientName)
+    {
+        var shared = this.Connection;
+
+        ConfigurationOptions config;
+
+        if (this.configuration is { } mine)
+        {
+            config = mine.Clone();
+        }
+        else if (!string.IsNullOrWhiteSpace(shared.Configuration))
+        {
+            config = ParseConfiguration(shared.Configuration);
+        }
+        else
+        {
+            config = ParseConfiguration(this.ConnectionString);
+        }
+
+        config.HighIntegrity = true;
+        config.AbortOnConnectFail = false;
+        config.ClientName = clientName;
+
+        var connected = await ConnectionMultiplexer.ConnectAsync(config).ConfigureAwait(false);
+        this.tracingApplier?.ApplyTracing(connected);
+
+        this.logger?.LogInformation(
+            "Streams: opened a dedicated high-integrity connection for partition ownership only; endpoint={Endpoint} " +
+            "clientName={ClientName}. Every reply on it is checksum-verified, so a desynchronised reply cannot be mistaken for a " +
+            "lease. Publishes, positions and reads stay on their usual connections.",
+            DescribeEndpoints(config.EndPoints),
+            clientName);
+
+        return connected;
     }
 
     /// <summary>

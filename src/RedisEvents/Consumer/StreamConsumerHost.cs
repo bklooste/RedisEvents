@@ -95,6 +95,29 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     private PositionFlusher? flusher;
     private OwnershipRegistry? ownership;
     private StreamReaderConnection? reader;
+
+    /// <summary>
+    /// The dedicated high-integrity connection that carries partition-ownership traffic and nothing
+    /// else: the ownership registry's lease script (renew, claim, give back, quarantine), its presence
+    /// field and release, and the position flusher's reads of the ownership hash. Opened at start,
+    /// disposed with the host.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why its own connection.</b> A lease reply decides who reads a partition; a reply that
+    /// belonged to another command must never be taken for one. StackExchange.Redis's
+    /// <c>highIntegrity</c> mode checks every reply with a checksum and reconnects on a mismatch, at
+    /// the cost of an ECHO per command. Ownership is a lease cycle every <c>LeaseRenewSeconds</c> plus
+    /// an occasional second-writer check, so the cost is nothing.
+    /// </para>
+    /// <para>
+    /// <b>Nothing else goes over it.</b> Publishes (<c>XADD</c>), position writes, reset markers,
+    /// admin and lag sampling stay on the shared connection, and stream reads on the reader
+    /// connection; paying an ECHO per command on those paths is not worth it. A position write that a
+    /// desynchronised reply misreports costs at most a redelivery, which at-least-once already allows.
+    /// </para>
+    /// </remarks>
+    private IConnectionMultiplexer? ownershipConnection;
     private Task[]? workers;
     private int recoveries;
 
@@ -204,6 +227,12 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
     /// <summary>Whether the host has been started and not yet stopped.</summary>
     public bool IsRunning => this.cts is not null;
+
+    /// <summary>The high-integrity ownership connection, once started. Internal, for tests.</summary>
+    internal IConnectionMultiplexer? OwnershipConnection => this.ownershipConnection;
+
+    /// <summary>The dedicated reader connection, in <c>ReadMode.Block</c>. Internal, for tests.</summary>
+    internal StreamReaderConnection? ReaderConnection => this.reader;
 
     /// <summary>
     /// The position store this host was built with, if any — asserted directly by
@@ -410,8 +439,16 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             return;
         }
 
+        this.ownershipConnection ??= await this.connection
+            .ConnectHighIntegrityAsync(
+                StreamNames.OwnershipClientName(
+                    System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "unknown",
+                    this.consumerName,
+                    podName))
+            .ConfigureAwait(false);
+
         this.ownership = new OwnershipRegistry(
-            redis,
+            this.ownershipConnection,
             new OwnershipRegistryOptions
             {
                 Topic = topic,
@@ -524,7 +561,11 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 onRecovered: this.OnPartitionRecovered,
                 recheckInterval: this.consumer.ContestedRecheckSeconds > 0
                     ? TimeSpan.FromSeconds(this.consumer.ContestedRecheckSeconds)
-                    : null);
+                    : null,
+
+                // Positions are written over the shared connection; only its reads of the
+                // ownership hash (who holds the partition, is the rival alive) are ownership traffic.
+                ownershipRedis: this.ownershipConnection);
 
             this.flusher.Start();
         }
@@ -1130,14 +1171,18 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         MultiStreamFetch fetch;
+        ReaderRebuild? rebuildReader = null;
 
         if (this.consumer.ReadMode == ReadMode.Block)
         {
-            fetch = new BlockFetch(
+            var block = new BlockFetch(
                 this.reader ?? throw new StreamConfigurationException(
                     $"Streams: consumer '{this.consumerName}' is in ReadMode.Block but no reader connection was opened."),
                 keys,
-                batchSize).FetchManyAsync;
+                batchSize);
+
+            fetch = block.FetchManyAsync;
+            rebuildReader = block.RebuildReaderAsync;
         }
         else
         {
@@ -1152,7 +1197,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             count,
             this.consumer.ReadMode);
 
-        var reading = PartitionWorker.ReadGroupLoopAsync(contexts, from, fetch, groupCts.Token, resets, this.RewindNotifier());
+        var reading = PartitionWorker.ReadGroupLoopAsync(
+            contexts, from, fetch, groupCts.Token, resets, this.RewindNotifier(), rebuildReader);
 
         _ = reading.ContinueWith(
             faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located read loop", generation),
@@ -1308,6 +1354,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         MultiStreamFetch fetch;
+        ReaderRebuild? rebuildReader = null;
 
         if (this.consumer.ReadMode == ReadMode.Block)
         {
@@ -1317,11 +1364,14 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 keys[i] = contexts[i].StreamKey;
             }
 
-            fetch = new BlockFetch(
+            var block = new BlockFetch(
                 this.reader ?? throw new StreamConfigurationException(
                     $"Streams: consumer '{this.consumerName}' is in ReadMode.Block but no reader connection was opened."),
                 keys,
-                batchSize).FetchManyAsync;
+                batchSize);
+
+            fetch = block.FetchManyAsync;
+            rebuildReader = block.RebuildReaderAsync;
         }
         else
         {
@@ -1347,7 +1397,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             this.consumer.Persist,
             flush,
             resets,
-            this.RewindNotifier());
+            this.RewindNotifier(),
+            rebuildReader);
 
         _ = reading.ContinueWith(
             faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located inline read loop", generation),
@@ -1399,6 +1450,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         Func<CancellationToken, ValueTask<StreamEntryBatch>> fetch;
         ResetSeek? seek;
+        ReaderRebuild? rebuildReader = null;
         PositionRecorder recorder;
         PositionFlush? flush;
 
@@ -1441,6 +1493,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
                 fetch = block.FetchAsync;
                 seek = block.SeekTo;
+                rebuildReader = block.RebuildReaderAsync;
             }
             else
             {
@@ -1529,11 +1582,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 flush,
                 resets,
                 seek,
-                this.RewindNotifier());
+                this.RewindNotifier(),
+                rebuildReader);
         }
         else
         {
-            var reading = PartitionWorker.ReadLoopAsync(ctx, from, fetch, partitionCts.Token, resets, seek, this.RewindNotifier());
+            var reading = PartitionWorker.ReadLoopAsync(
+                ctx, from, fetch, partitionCts.Token, resets, seek, this.RewindNotifier(), rebuildReader);
             var channelReader = channel.Reader;
 
             // Task.Run: handler code starts on the standard ThreadPool, never on a reader thread.
@@ -1919,6 +1974,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         {
             await claims.DisposeAsync().ConfigureAwait(false);
             this.ownership = null;
+        }
+
+        // After the registry, whose final release runs over it.
+        if (this.ownershipConnection is { } verified)
+        {
+            this.ownershipConnection = null;
+            await verified.DisposeAsync().ConfigureAwait(false);
         }
 
         if (this.reader is { } connected)

@@ -25,15 +25,24 @@ actually changed.
 - **A reply the client cannot read is a transport failure, not the end of the partition.** A garbled or
   desynchronised connection shows up as `InvalidCastException: Cannot convert to RedisValue: Array`
   from StackExchange.Redis's reply processing, or as a malformed `XREAD` reply. That used to fault the
-  read loop. The read loop now waits it out with the same 1 s → 30 s backoff as a timeout; the stall
-  rule bounds how long. The error contract is unchanged: only `DontIgnoreException` blocks a handler, and
-  `StreamTransportException` (the malformed-reply error) already was one.
-- **`BlockFetch` no longer lets an array in a scalar slot escape as a bare `InvalidCastException`.**
-  A stream key, entry id or field that arrives as an array is reported as a malformed reply
-  (`StreamTransportException`), as the parser already claimed to do.
-- **The dedicated reader connection runs with StackExchange.Redis `HighIntegrity` on.** That adds an ECHO
-  checksum after each `XREAD` and reconnects when a reply does not match, so a desync on the reader
-  heals itself instead of feeding every read the reply meant for another command.
+  read loop. On the dedicated reader connection (`ReadMode.Block`) the loop now treats it as a poisoned
+  connection: it rebuilds the reader connection (once, however many loops share it) and resumes from
+  the position its handler last recorded, never from anything the bad reply said; read-ahead past that
+  position is delivered again (at-least-once), nothing is skipped. Then it backs off as for a timeout,
+  and the stall rule bounds the episode. The error contract is unchanged: only `DontIgnoreException`
+  blocks a handler, and `StreamTransportException` (the malformed-reply error) already was one.
+- **`BlockFetch` validates every `XREAD` reply against the read that was sent.** A stream key, entry id
+  or field that arrives as an array; a stream key that was not requested (the single-stream "whatever
+  its key text says" rescue is gone: nothing rewrites keys on the library's own reader connection); or
+  entry ids that are not strictly after the cursor sent and ascending: each is a malformed reply
+  (`StreamTransportException`). Those are how a reply meant for another read shows up.
+- **Partition ownership runs on its own `highIntegrity` connection.** The lease script (renew, claim,
+  give back, quarantine), presence, the release, and the flusher's reads of the ownership hash go over a
+  dedicated connection cloned from the shared one (`ConfigurationOptions.Clone()`, or a parse of a
+  reused multiplexer's `Configuration`) with StackExchange.Redis `HighIntegrity` on, so a desynchronised
+  reply can never be taken for a lease. It carries nothing else: publishes, position writes and reads
+  stay on their usual connections, and the reader is never `highIntegrity` (it validates replies
+  instead). Disposed with the host.
 
 ### Added
 

@@ -24,6 +24,15 @@ namespace RedisEvents.Consumer;
 /// </remarks>
 internal delegate ValueTask PositionFlush(CancellationToken ct);
 
+/// <summary>
+/// Rebuilds the dedicated reader connection after a reply on it could not be trusted; see
+/// <see cref="BlockFetch.RebuildReaderAsync"/>.
+/// </summary>
+/// <param name="reason">Why, for the log line.</param>
+/// <param name="ct">Cancellation for the rebuild.</param>
+/// <returns><see langword="true"/> when this call rebuilt the connection.</returns>
+internal delegate ValueTask<bool> ReaderRebuild(string reason, CancellationToken ct);
+
 internal static partial class PartitionWorker
 {
     /// <summary>What the loop should do after a batch.</summary>
@@ -946,8 +955,9 @@ internal static partial class PartitionWorker
     /// <c>InvalidCastException: Cannot convert to RedisValue: Array</c>. Ending the read loop on that
     /// left the partition unread while the ownership lease — renewed by a script that never looks at
     /// the read side — kept it away from every other instance (the 2026-10-25 offer-odds-projection
-    /// incident). Retried with the same 1 s → 30 s backoff it cannot spin; the connection gets the
-    /// chance to reconnect; and if it never recovers the stall rule
+    /// incident). Retried with the same 1 s → 30 s backoff it cannot spin; on the dedicated reader the
+    /// loop first rebuilds the connection and resumes from its recorded position
+    /// (<see cref="RebuildPoisonedReaderAsync"/>); and if it never recovers the stall rule
     /// (<c>ConsumerOptions.UnhealthyStalledSeconds</c>) gives the lease up and fails the health
     /// check. <see cref="Errors.StreamTransportException"/> is a <c>DontIgnoreException</c> for
     /// exactly this reason: "block and retry" is what it means.
@@ -978,7 +988,8 @@ internal static partial class PartitionWorker
     /// out of StackExchange.Redis's reply processing (it attaches the offending reply as
     /// <c>Data["got"]</c>), which is how a reply meant for another command shows up on a typed one;
     /// and the error StackExchange.Redis's <c>highIntegrity</c> mode raises when it catches the
-    /// desync itself, before it reconnects.
+    /// desync itself — reachable only in <c>ReadMode.Poll</c>, on a shared connection the application
+    /// configured with it; the dedicated reader never runs with it.
     /// </remarks>
     /// <param name="ex">The exception the fetch threw.</param>
     /// <returns><see langword="true"/> when the reply, not the request, is what failed.</returns>
@@ -1062,6 +1073,69 @@ internal static partial class PartitionWorker
     /// <param name="ctx">The partition's context.</param>
     /// <param name="outageDelayMs">The outage backoff, or zero when the connection was never lost.</param>
     /// <returns>Zero — the value the loop carries while the connection is healthy.</returns>
+    /// <summary>
+    /// When a read failed because its reply could not be trusted and the loop reads over the
+    /// dedicated reader connection, rebuilds that connection. Returns whether the loop must then
+    /// resume from its recorded positions.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A reply that fails validation is the evidence that the connection's replies have slipped
+    /// against its requests. Retrying on the same socket would only fetch more replies meant for
+    /// other reads, so the connection is replaced — once, however many loops share it and saw the bad
+    /// reply (<see cref="StreamReaderConnection.RebuildAsync"/> compares generations).
+    /// </para>
+    /// <para>
+    /// The loop then resumes from the position its handler last recorded
+    /// (<see cref="StreamPartitionMonitor.Position"/>), the position the flusher persists — never
+    /// from anything the bad reply said. A read-ahead batch already queued for the processor is still
+    /// handled and is then read again: a duplicate, which at-least-once allows; nothing is skipped.
+    /// A rebuild that fails (Redis unreachable) is logged; the loop backs off as for any transport
+    /// failure, the next untrusted reply asks again, and the stall rule bounds the whole episode.
+    /// </para>
+    /// </remarks>
+    private static async ValueTask<bool> RebuildPoisonedReaderAsync(
+        PartitionContext ctx,
+        Exception ex,
+        ReaderRebuild? rebuild,
+        CancellationToken ct)
+    {
+        if (rebuild is null || !IsUnreadableReply(ex))
+        {
+            return false;
+        }
+
+        try
+        {
+            await rebuild($"{ex.GetType().Name}: {ex.Message}", ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception failure)
+        {
+            ctx.Log.LogWarning(
+                failure,
+                "Streams: could not rebuild the reader connection for topic={Topic} consumer={Consumer} after an untrusted reply; " +
+                "the read backs off and the next untrusted reply asks again.",
+                ctx.Topic,
+                ctx.Consumer);
+        }
+
+        return true;
+    }
+
+    /// <summary>Logs a resume from the recorded position after a rebuilt reader.</summary>
+    private static void LogResume(in PartitionContext ctx, StreamId position)
+        => ctx.Log.LogWarning(
+            "Streams: topic={Topic} partition={Partition} consumer={Consumer} resumes after {Position}, the position its handler last " +
+            "recorded, because the reply it was reading could not be trusted. Batches read ahead of that position are delivered again.",
+            ctx.Topic,
+            ctx.Partition,
+            ctx.Consumer,
+            position.Format());
+
     private static int ResumeAfterOutage(in PartitionContext ctx, int outageDelayMs)
     {
         if (outageDelayMs == 0)
