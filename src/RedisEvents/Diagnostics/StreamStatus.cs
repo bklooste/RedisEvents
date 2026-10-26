@@ -82,6 +82,9 @@ public static class StreamStatus
             TailUnchangedMs = progress.TailUnchangedMs,
             IsBehindTail = progress.IsBehind,
             BehindMs = progress.BehindMs,
+            UnhealthyStalledSeconds = m.UnhealthyStalledSeconds,
+            StalledMs = m.StalledMs,
+            StoodDownStalled = m.IsStalledOut,
         };
     }
 }

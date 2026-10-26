@@ -91,6 +91,12 @@ internal sealed class BlockFetch
     private RedisValue cursor;
 
     /// <summary>
+    /// The reader connection's <see cref="StreamReaderConnection.Generation"/> when the last read
+    /// was issued — which connection answered it, for <see cref="RebuildReaderAsync"/>.
+    /// </summary>
+    private long issuedOn;
+
+    /// <summary>
     /// Creates the blocking fetch for one partition.
     /// </summary>
     /// <param name="reader">
@@ -210,6 +216,9 @@ internal sealed class BlockFetch
     {
         ct.ThrowIfCancellationRequested();
 
+        var sent = this.cursor;
+        this.issuedOn = this.reader.Generation;
+
         var reply = await this.reader.ExecuteXReadAsync(this.args, ct).ConfigureAwait(false);
 
         // Cancellation is observed here as well as on entry: the block just ended, so this is the
@@ -222,6 +231,9 @@ internal sealed class BlockFetch
         {
             return batch;
         }
+
+        // The cursor only ever moves to an id from a reply that answered the read actually sent.
+        ValidateIds(batch.Span, sent);
 
         // Advance past the last entry read. The reply id is kept exactly as Redis sent it, which is
         // what the next XREAD wants, so a steady read parses and formats nothing.
@@ -287,12 +299,78 @@ internal sealed class BlockFetch
             this.args[this.cursorSlot + i] = positions[i].Position;
         }
 
+        this.issuedOn = this.reader.Generation;
+
         var reply = await this.reader.ExecuteXReadAsync(this.args, ct).ConfigureAwait(false);
 
         // The block just ended, so this is the boundary the shutdown path waits for.
         ct.ThrowIfCancellationRequested();
 
-        return ParseAll(reply, this.keys, this.keyBytes);
+        var slices = ParseAll(reply, this.keys, this.keyBytes);
+
+        // Every slice is a requested key by now (ParseAll refuses any other); check each one's ids
+        // against the cursor that was sent for that key. The caller does not touch the positions
+        // while the read is in flight, so they still hold what went on the wire.
+        for (var s = 0; s < slices.Length; s++)
+        {
+            var at = Array.IndexOf(this.keys, slices[s].Key);
+            ValidateIds(slices[s].Span, positions[at].Position);
+        }
+
+        return slices;
+    }
+
+    /// <summary>
+    /// Asks for the reader connection to be rebuilt after this fetch got a reply it could not trust.
+    /// A no-op when another read loop sharing the connection has already rebuilt it since this
+    /// fetch's last read was issued.
+    /// </summary>
+    /// <param name="reason">Why, for the log line.</param>
+    /// <param name="ct">Cancellation for the rebuild.</param>
+    /// <returns><see langword="true"/> when this call rebuilt the connection.</returns>
+    internal ValueTask<bool> RebuildReaderAsync(string reason, CancellationToken ct)
+        => this.reader.RebuildAsync(this.issuedOn, reason, ct);
+
+    /// <summary>
+    /// Checks that a reply's entry ids answer the read that was sent: every id strictly after the
+    /// cursor, and strictly ascending.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>XREAD … STREAMS key id</c> returns only entries after <c>id</c>, in id order. A reply that
+    /// breaks either rule did not answer this read: on a connection whose replies have slipped
+    /// against its requests it is the reply to an earlier read — another partition's, or this one's
+    /// from an older cursor, whose ids then run from before the current cursor. Accepting it would
+    /// move the cursor backwards (a replay) or onto another partition's ids (a skip). Together with
+    /// the key match and the scalar-slot checks this is how desync is caught on a connection that
+    /// does not pay for <c>highIntegrity</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="entries">The parsed entries.</param>
+    /// <param name="sentCursor">The id this key's read was issued after.</param>
+    /// <exception cref="StreamTransportException">An id is not after the cursor, or not ascending.</exception>
+    internal static void ValidateIds(ReadOnlySpan<StreamEntry> entries, RedisValue sentCursor)
+    {
+        if (entries.IsEmpty)
+        {
+            return;
+        }
+
+        var previous = sentCursor.IsNullOrEmpty ? StreamId.Min : EntryCodec.ParseId(sentCursor);
+
+        for (var i = 0; i < entries.Length; i++)
+        {
+            var id = EntryCodec.ParseId(entries[i].Id);
+
+            if (id <= previous)
+            {
+                throw Malformed(
+                    $"entry id {id.Format()} is not after {previous.Format()}, so the reply does not answer the read that was " +
+                    $"issued after {(sentCursor.IsNullOrEmpty ? "0-0" : sentCursor.ToString())}");
+            }
+
+            previous = id;
+        }
     }
 
     /// <summary>
@@ -321,9 +399,8 @@ internal sealed class BlockFetch
     /// </remarks>
     /// <param name="reply">The raw reply from <c>XREAD</c>.</param>
     /// <param name="expectedKey">
-    /// The stream key that was requested, used only to pick the right stream out of a multi-stream
-    /// reply. A single-stream reply is accepted as-is, since it can only be the stream that was
-    /// asked for.
+    /// The stream key that was requested. The reply must carry it byte for byte; a reply without it
+    /// is not the answer to this read.
     /// </param>
     /// <exception cref="StreamTransportException">The reply was not in the documented shape.</exception>
     internal static StreamEntryBatch Parse(RedisResult? reply, ReadOnlySpan<byte> expectedKey)
@@ -345,14 +422,12 @@ internal sealed class BlockFetch
         }
 
         RedisResult? matched = null;
-        RedisResult? firstStream = null;
         var streams = 0;
         var walk = new StreamWalk(reply, length);
 
         while (walk.TryNext(out var streamKey, out var streamEntries))
         {
             streams++;
-            firstStream ??= streamEntries;
 
             if (matched is null && Matches(streamKey, expectedKey))
             {
@@ -360,10 +435,13 @@ internal sealed class BlockFetch
             }
         }
 
-        // One key is requested per fetch, so a single-stream reply is ours whatever its key text
-        // says — a key prefix configured on the connection, for one, would rewrite it. The key
-        // comparison only has to decide between streams, which is why it is not fatal on its own.
-        var entries = matched ?? (streams == 1 ? firstStream : null);
+        // The key must match, byte for byte. This used to accept any single-stream reply "whatever
+        // its key text says", for a key prefix the connection might add — but this connection is the
+        // library's own, nothing rewrites its keys, and Redis echoes the key exactly as it was sent.
+        // What does produce a foreign key is desync: non-co-located partitions share the reader
+        // connection, so a slipped reply is very often another partition's, and taking it would
+        // record that partition's ids as this one's cursor.
+        var entries = matched;
 
         if (entries is null)
         {
@@ -380,8 +458,8 @@ internal sealed class BlockFetch
     /// The same walk <see cref="Parse"/> uses — RESP2 pairs and the RESP3 map are told apart by
     /// shape, in one place, so the two forms of the reply cannot drift apart. Each reply key is
     /// matched to a requested key on raw bytes, and the slice carries the <em>requested</em>
-    /// <see cref="RedisKey"/> so the read loop's slot lookup compares like with like whatever the
-    /// connection's key prefix did to the text on the wire.
+    /// <see cref="RedisKey"/> so the read loop's slot lookup compares like with like. A key that was
+    /// not requested is a malformed reply, never a slice.
     /// </remarks>
     /// <param name="reply">The raw reply from <c>XREAD</c>.</param>
     /// <param name="keys">The keys that were requested, in request order.</param>
@@ -409,11 +487,6 @@ internal sealed class BlockFetch
         var hint = 0;
         var walk = new StreamWalk(reply, length);
 
-        // The slot of the one unmatched stream, if the reply holds exactly one. See the note where it
-        // is resolved, below.
-        var unmatched = -1;
-        var unmatchedCount = 0;
-
         while (walk.TryNext(out var streamKey, out var streamEntries))
         {
             var batch = ParseEntries(streamEntries);
@@ -432,24 +505,11 @@ internal sealed class BlockFetch
                 continue;
             }
 
-            // A key that was not requested. Never expected; carried through with the key as it
-            // arrived so the read loop can warn about it rather than silently mis-attributing it.
-            unmatched = found;
-            unmatchedCount++;
-            slices[found++] = new StreamSlice((byte[]?)(RedisValue)streamKey ?? [], batch.Entries, batch.Count);
-        }
-
-        // The single-key rescue, and the reason it is HERE rather than inside SlotOf. A single-stream
-        // reply to a single-key read can only be the stream that was asked for whatever the key text
-        // says — a key prefix configured on the connection would rewrite it — which is the same
-        // judgement Parse makes. SlotOf made that call without knowing how many streams the reply
-        // carried, so a reply holding two streams, one of them a key this worker never asked for,
-        // recorded the foreign stream's entries (and its last id) as partition 0's position: a silent
-        // skip of everything between. Deciding it once the walk is done is the only place the stream
-        // count is known.
-        if (keyBytes.Length == 1 && found == 1 && unmatchedCount == 1)
-        {
-            slices[unmatched] = new StreamSlice(keys[0], slices[unmatched].Entries, slices[unmatched].Count);
+            // A key that was not requested. Redis answers XREAD with exactly the keys it was asked
+            // for, as they were sent, so this reply is not the answer to this read: the connection's
+            // replies have slipped. Refused, never attributed — taking it as one of ours would
+            // record a foreign stream's ids as that partition's cursor.
+            throw Malformed($"the reply carried stream key '{(string?)Scalar(streamKey, "a stream key")}', which was not requested");
         }
 
         if (found == length)
@@ -463,7 +523,7 @@ internal sealed class BlockFetch
     /// <summary>Finds the requested key a reply's stream key matches, starting from <paramref name="hint"/>.</summary>
     private static int SlotOf(RedisResult streamKey, byte[][] keyBytes, int hint)
     {
-        ReadOnlyMemory<byte> raw = (RedisValue)streamKey;
+        ReadOnlyMemory<byte> raw = Scalar(streamKey, "a stream key");
         var span = raw.Span;
 
         for (var i = hint; i < keyBytes.Length; i++)
@@ -482,9 +542,7 @@ internal sealed class BlockFetch
             }
         }
 
-        // Unmatched. The "one key was requested, so slot 0 it is" shortcut used to live here; it now
-        // lives in ParseAll, which is the only place that can tell a single-stream reply from a
-        // multi-stream one. See the note there.
+        // Unmatched: ParseAll refuses the reply.
         return -1;
     }
 
@@ -586,7 +644,7 @@ internal sealed class BlockFetch
                 throw Malformed($"an entry held {entry.Length} items where '[id, fields]' was expected");
             }
 
-            var id = (RedisValue)entry[0];
+            var id = Scalar(entry[0], "an entry id");
 
             if (id.IsNull)
             {
@@ -632,7 +690,7 @@ internal sealed class BlockFetch
         for (var i = 0; i < pairs.Length; i++)
         {
             var at = i * 2;
-            pairs[i] = new NameValueEntry((RedisValue)fields[at], (RedisValue)fields[at + 1]);
+            pairs[i] = new NameValueEntry(Scalar(fields[at], "a field name"), Scalar(fields[at + 1], "a field value"));
         }
 
         return pairs;
@@ -655,9 +713,45 @@ internal sealed class BlockFetch
             return false;
         }
 
-        ReadOnlyMemory<byte> raw = (RedisValue)streamKey;
+        ReadOnlyMemory<byte> raw = Scalar(streamKey, "a stream key");
 
         return raw.Span.SequenceEqual(expectedKey);
+    }
+
+    /// <summary>
+    /// Reads one scalar slot of the reply — a stream key, an entry id, a field name or value —
+    /// refusing an array in its place.
+    /// </summary>
+    /// <remarks>
+    /// The plain <c>(RedisValue)</c> cast this replaces throws a bare <see cref="InvalidCastException"/>
+    /// for any array of more than one element, which escaped every shape check above: the read loop
+    /// does not know it as a transport failure, so a single garbled reply ended the partition for
+    /// good while its lease stayed renewed. An array where a scalar belongs is a reply that is not in
+    /// the <c>XREAD</c> shape, and is reported as one — a <see cref="StreamTransportException"/>,
+    /// which the read loop waits out like any other transport failure.
+    /// </remarks>
+    /// <param name="value">The reply element.</param>
+    /// <param name="what">What the slot holds, for the error.</param>
+    /// <returns>The scalar value.</returns>
+    /// <exception cref="StreamTransportException">The slot held an array.</exception>
+    private static RedisValue Scalar(RedisResult value, string what)
+    {
+        if (IsArray(value))
+        {
+            throw Malformed($"{what} arrived as an array of {value.Length} items where a single value was expected");
+        }
+
+        try
+        {
+            return (RedisValue)value;
+        }
+        catch (InvalidCastException ex)
+        {
+            throw new StreamTransportException(
+                $"Streams: the XREAD reply was not in the expected shape — {what} could not be read as a value ({ex.Message}). " +
+                "Refusing to guess, because a mis-parsed reply would leave the read cursor unmoved and spin the reader.",
+                ex);
+        }
     }
 
     private static StreamTransportException Malformed(string detail) =>

@@ -274,7 +274,7 @@ internal static class EntryCodec
     }
 
     /// <summary>Parses an entry id straight out of its UTF-8 bytes, with no intermediate string.</summary>
-    private static StreamId ParseId(RedisValue id)
+    internal static StreamId ParseId(RedisValue id)
     {
         if (id.IsNullOrEmpty)
         {

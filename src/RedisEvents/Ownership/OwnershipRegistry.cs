@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
@@ -205,6 +206,12 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
     private static readonly ConcurrentDictionary<string, OwnershipMap> Observed = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Partitions this instance must neither renew nor claim, each with the <see cref="Stopwatch"/>
+    /// timestamp its quarantine ends at. See <see cref="Quarantine"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, long> quarantine = new();
+
+    /// <summary>
     /// Prefix of the per-instance presence field, <c>i:&lt;instanceId&gt;</c>.
     /// </summary>
     /// <remarks>
@@ -271,6 +278,15 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
     /// is no window in which a field exists without an expiry, and <c>HSETNX</c> is what makes two
     /// instances claiming one partition at once impossible rather than merely unlikely.
     /// </para>
+    /// <para>
+    /// <b>Quarantined partitions</b> (<c>ARGV[5..]</c>, see <see cref="Quarantine"/>) are partitions
+    /// this instance stalled on. The script gives them back if it still holds them and never claims
+    /// them, and while any are quarantined it also withdraws its presence field: an instance that
+    /// cannot read must not count towards the fair share, or the instance that should take its
+    /// partitions over stays capped at <c>ceil(partitions / members)</c> and leaves them unowned.
+    /// Renewing the leases it still holds does not depend on presence, so a partial stall keeps the
+    /// partitions that are still moving.
+    /// </para>
     /// </remarks>
     private const string LeaseScript = """
         local me = ARGV[1]
@@ -278,8 +294,19 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         local n = tonumber(ARGV[3])
         local presence = ARGV[4]
 
-        redis.call('HSET', KEYS[1], presence, me)
-        redis.call('HEXPIRE', KEYS[1], ttl, 'FIELDS', 1, presence)
+        local skip = {}
+        local quarantined = false
+        for i = 5, #ARGV do
+          skip[ARGV[i]] = true
+          quarantined = true
+        end
+
+        if quarantined then
+          redis.call('HDEL', KEYS[1], presence)
+        else
+          redis.call('HSET', KEYS[1], presence, me)
+          redis.call('HEXPIRE', KEYS[1], ttl, 'FIELDS', 1, presence)
+        end
 
         local members = 0
         local names = redis.call('HKEYS', KEYS[1])
@@ -291,7 +318,14 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
 
         local held = {}
         for p = 0, n - 1 do
-          if redis.call('HGET', KEYS[1], tostring(p)) == me then held[#held + 1] = p end
+          local f = tostring(p)
+          if redis.call('HGET', KEYS[1], f) == me then
+            if skip[f] then
+              redis.call('HDEL', KEYS[1], f)
+            else
+              held[#held + 1] = p
+            end
+          end
         end
 
         while #held > cap do
@@ -306,7 +340,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
           for p = 0, n - 1 do
             if #held >= cap then break end
             local f = tostring(p)
-            if redis.call('HSETNX', KEYS[1], f, me) == 1 then
+            if not skip[f] and redis.call('HSETNX', KEYS[1], f, me) == 1 then
               redis.call('HEXPIRE', KEYS[1], ttl, 'FIELDS', 1, f)
               held[#held + 1] = p
             end
@@ -624,7 +658,7 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
     {
         var db = this.redis.GetDatabase();
 
-        var result = await db.ScriptEvaluateAsync(LeaseScript, [this.key], this.leaseArgs).ConfigureAwait(false);
+        var result = await db.ScriptEvaluateAsync(LeaseScript, [this.key], this.LeaseArgs()).ConfigureAwait(false);
         var claimed = (int[]?)result ?? [];
 
         ct.ThrowIfCancellationRequested();
@@ -741,6 +775,98 @@ internal sealed class OwnershipRegistry : IAsyncDisposable
         StreamsDiagnostics.SetUnownedPartitions(this.metricKey, 0);
         StreamsDiagnostics.SetContestedPartitions(this.metricKey, 0);
         Observed.TryRemove(this.metricKey, out _);
+    }
+
+    /// <summary>
+    /// Gives partitions up and keeps them away from this instance for a while: the next lease cycle
+    /// releases them if they are still held and claims none of them until <paramref name="duration"/>
+    /// has passed, and this instance stops counting towards the fair share in the meantime.
+    /// </summary>
+    /// <param name="partitions">The partitions this instance stalled on.</param>
+    /// <param name="duration">How long to keep away from them.</param>
+    /// <remarks>
+    /// <para>
+    /// This is what lets a stuck owner be replaced. The lease script renews whatever this instance
+    /// holds as long as the script itself reaches Redis — it knows nothing about whether the read
+    /// side behind it is reading — so a process whose consumer has wedged would otherwise keep
+    /// its partitions from every other instance for as long as it stays up. The consumer host calls
+    /// this when a partition stalls (<c>ConsumerOptions.UnhealthyStalledSeconds</c>) and then forces
+    /// a cycle, so the lease goes now rather than at the next renewal.
+    /// </para>
+    /// <para>
+    /// The quarantine ends on its own. An instance that is the only one left takes the partitions
+    /// back when it does, on a fresh read side — the best it can do short of the restart its health
+    /// check is asking for. Static mode has no leases to give up and ignores it.
+    /// </para>
+    /// </remarks>
+    public void Quarantine(IEnumerable<int> partitions, TimeSpan duration)
+    {
+        ArgumentNullException.ThrowIfNull(partitions);
+
+        if (!this.lease)
+        {
+            return;
+        }
+
+        var until = Stopwatch.GetTimestamp() + (long)(duration.TotalSeconds * Stopwatch.Frequency);
+
+        foreach (var partition in partitions)
+        {
+            this.quarantine[partition] = until;
+        }
+    }
+
+    /// <summary>The partitions currently quarantined, ascending; expired entries are dropped.</summary>
+    public IReadOnlyList<int> Quarantined
+    {
+        get
+        {
+            if (this.quarantine.IsEmpty)
+            {
+                return [];
+            }
+
+            var now = Stopwatch.GetTimestamp();
+            var active = new List<int>(this.quarantine.Count);
+
+            foreach (var (partition, until) in this.quarantine)
+            {
+                if (until <= now)
+                {
+                    this.quarantine.TryRemove(new KeyValuePair<int, long>(partition, until));
+                    continue;
+                }
+
+                active.Add(partition);
+            }
+
+            active.Sort();
+            return active;
+        }
+    }
+
+    /// <summary>
+    /// The lease script's arguments for this cycle: the four fixed ones, plus every partition still
+    /// in quarantine.
+    /// </summary>
+    private RedisValue[] LeaseArgs()
+    {
+        var quarantined = this.Quarantined;
+
+        if (quarantined.Count == 0)
+        {
+            return this.leaseArgs;
+        }
+
+        var args = new RedisValue[this.leaseArgs.Length + quarantined.Count];
+        this.leaseArgs.CopyTo(args, 0);
+
+        for (var i = 0; i < quarantined.Count; i++)
+        {
+            args[this.leaseArgs.Length + i] = quarantined[i].ToString(CultureInfo.InvariantCulture);
+        }
+
+        return args;
     }
 
     /// <summary>

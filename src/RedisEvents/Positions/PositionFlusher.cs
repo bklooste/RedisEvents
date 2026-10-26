@@ -93,6 +93,13 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
     private readonly IPositionStore store;
     private readonly IConnectionMultiplexer? redis;
+
+    /// <summary>
+    /// The connection the ownership hash is read over for the second-writer checks: the consumer
+    /// host's high-integrity ownership connection, so a desynchronised reply can never be taken for
+    /// who holds a partition. Positions themselves are written over <see cref="redis"/>.
+    /// </summary>
+    private readonly IConnectionMultiplexer? ownershipRedis;
     private readonly RedisKey key;
     private readonly string topic;
     private readonly string consumer;
@@ -179,6 +186,12 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private int contentionCount;
     private long flushes;
     private long failures;
+
+    /// <summary>
+    /// <see cref="Stopwatch"/> timestamp of the first failure in the current run of failed flushes, or
+    /// 0 when the last flush landed.
+    /// </summary>
+    private long failingSince;
     private long resetsApplied;
     private long recoveries;
     private int ticks;
@@ -255,7 +268,8 @@ internal sealed class PositionFlusher : IAsyncDisposable
         bool exclusiveClaims = false,
         TimeSpan contestedGrace = default,
         PartitionRecoveredCallback? onRecovered = null,
-        TimeSpan? recheckInterval = null)
+        TimeSpan? recheckInterval = null,
+        IConnectionMultiplexer? ownershipRedis = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
@@ -265,6 +279,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
         this.store = store;
         this.redis = redis;
+        this.ownershipRedis = ownershipRedis ?? redis;
         this.topic = topic;
         this.consumer = consumer;
         this.interval = interval;
@@ -343,6 +358,22 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
     /// <summary>Flushes that threw and will be retried. Mirrors <c>streams.positions.flush_failures</c>.</summary>
     internal long Failures => Interlocked.Read(ref this.failures);
+
+    /// <summary>
+    /// How long position writes have been failing without one landing, or zero when the last flush
+    /// succeeded (or nothing has needed writing since). Read by the consumer host's stall check: a
+    /// consumer whose every position write fails is not making durable progress, however busy its
+    /// handler looks.
+    /// </summary>
+    internal TimeSpan FailingFor
+    {
+        get
+        {
+            var since = Volatile.Read(ref this.failingSince);
+
+            return since == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(since);
+        }
+    }
 
     /// <summary>Partitions stood down because a live second instance was writing them.</summary>
     /// <remarks>
@@ -470,6 +501,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
         if (Volatile.Read(ref this.dirtyCount) == 0 && !anyTaken)
         {
+            // Nothing waiting to be written, so nothing is failing to be: a failed flush re-queues
+            // what it drained, which keeps the count above zero until a write lands.
+            Volatile.Write(ref this.failingSince, 0);
             return;
         }
 
@@ -488,17 +522,25 @@ internal sealed class PositionFlusher : IAsyncDisposable
             count = this.Drain();
             if (count == 0)
             {
+                Volatile.Write(ref this.failingSince, 0);
                 return;
             }
 
             await this.WriteAsync(count, ct).ConfigureAwait(false);
             Interlocked.Increment(ref this.flushes);
+            Volatile.Write(ref this.failingSince, 0);
         }
         catch (Exception ex)
         {
             // Never fails a batch: re-queue what we drained and let the next tick try again.
             this.Requeue(count);
             Interlocked.Increment(ref this.failures);
+
+            if (ex is not OperationCanceledException)
+            {
+                Interlocked.CompareExchange(ref this.failingSince, Stopwatch.GetTimestamp(), 0);
+            }
+
             StreamsDiagnostics.StreamsPositionsFlushFailures.Add(1, this.topicTag, this.consumerTag);
 
             if (ex is not OperationCanceledException)
@@ -768,7 +810,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// <returns>A task that completes once every candidate has been judged.</returns>
     private async ValueTask JudgeAsync(int candidates, CancellationToken ct)
     {
-        var db = this.redis?.GetDatabase();
+        var db = this.ownershipRedis?.GetDatabase();
         if (db is null)
         {
             return;
@@ -927,7 +969,7 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// </remarks>
     internal async ValueTask RecheckAsync(CancellationToken ct)
     {
-        var db = this.redis?.GetDatabase();
+        var db = this.ownershipRedis?.GetDatabase();
         if (db is null || this.onRecovered is null)
         {
             return;

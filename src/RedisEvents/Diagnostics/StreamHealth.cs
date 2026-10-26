@@ -80,6 +80,13 @@ public enum StreamHealthRule
     /// them has moved past <c>DegradedSilenceSeconds</c>.
     /// </summary>
     Silent = 12,
+
+    /// <summary>
+    /// Unhealthy: a partition this instance owns has made no progress — no read has returned, no
+    /// batch has completed, or its position writes keep failing — past <c>UnhealthyStalledSeconds</c>,
+    /// or the host already stood it down for that reason (and in <c>Lease</c> mode gave its lease up).
+    /// </summary>
+    Stalled = 13,
 }
 
 /// <summary>One partition's own grade, before the process-wide rules are applied.</summary>
@@ -279,6 +286,24 @@ public static class StreamHealth
                 data);
         }
 
+        if (tally.Stalled is { } stuck)
+        {
+            data["stalledPartition"] = Describe(stuck);
+            data["stalledMs"] = (long)stuck.StalledMs;
+
+            return Unhealthy(
+                StreamHealthRule.Stalled,
+                stuck.StoodDownStalled
+                    ? $"Streams: partition {Describe(stuck)} was stood down by this instance ({stuck.StopReason}), and in Lease mode its " +
+                      "lease handed to another instance. Whatever stopped it is still in this process; a restart rebuilds its Redis " +
+                      "connections."
+                    : $"Streams: partition {Describe(stuck)} has made no progress for {Seconds(stuck.StalledMs)}s — no read returned and no " +
+                      $"batch completed, or its position writes kept failing — past its UnhealthyStalledSeconds of {stuck.UnhealthyStalledSeconds}. " +
+                      "It holds the partition and is not reading it; a restart hands the partition on.",
+                data,
+                stuck);
+        }
+
         if (tally.BlockedTooLong is { } wedged)
         {
             return Unhealthy(
@@ -402,6 +427,17 @@ public static class StreamHealth
     /// <returns>The partition's status and the rule that decided it.</returns>
     public static StreamPartitionHealth Grade(in StreamPartitionStatus partition)
     {
+        // First, because it is the one rule that does not depend on anything this process reads from
+        // Redis: a consumer whose connection is broken cannot sample its tail, so behind-the-tail
+        // stands down exactly when it is needed, and a read that keeps failing restarts no clock of
+        // its own. StalledMs is already 0 for the states the rule does not apply to.
+        if (partition.StoodDownStalled
+            || (partition.UnhealthyStalledSeconds > 0
+                && partition.StalledMs >= partition.UnhealthyStalledSeconds * 1000d))
+        {
+            return new(StreamHealthStatus.Unhealthy, StreamHealthRule.Stalled);
+        }
+
         switch (partition.State)
         {
             case StreamPartitionRunState.Blocked:
@@ -627,6 +663,10 @@ public static class StreamHealth
 
             switch (Grade(in partition).Rule)
             {
+                case StreamHealthRule.Stalled:
+                    counts.Stalled ??= partition;
+                    break;
+
                 case StreamHealthRule.BlockedTooLong:
                     counts.BlockedTooLong ??= partition;
                     break;
@@ -757,6 +797,9 @@ public static class StreamHealth
 
         /// <summary>The first partition behind its tail with a frozen position past its threshold, if any.</summary>
         public StreamPartitionStatus? BehindTooLong;
+
+        /// <summary>The first partition stalled past its threshold, or stood down for stalling, if any.</summary>
+        public StreamPartitionStatus? Stalled;
 
         /// <summary>Why the first stopped partition stopped.</summary>
         public string? StopReason;

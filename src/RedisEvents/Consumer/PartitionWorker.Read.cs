@@ -83,7 +83,8 @@ internal static partial class PartitionWorker
         CancellationToken ct,
         ResetSignal? resets = null,
         ResetSeek? seek = null,
-        Action<int>? rewind = null)
+        Action<int>? rewind = null,
+        ReaderRebuild? rebuildReader = null)
     {
         ArgumentNullException.ThrowIfNull(fetch);
 
@@ -130,6 +131,16 @@ internal static partial class PartitionWorker
                     // this is a block-and-retry failure, not a partition-ending one: tearing the
                     // worker down would turn a failover into a dead consumer that only a pod
                     // restart brings back.
+                    if (await RebuildPoisonedReaderAsync(ctx, ex, rebuildReader, ct).ConfigureAwait(false)
+                        && seek is not null
+                        && ctx.Monitor is { } recorded)
+                    {
+                        var resume = recorded.Position;
+                        rewind?.Invoke(ctx.Partition);
+                        seek(resume);
+                        LogResume(in ctx, resume);
+                    }
+
                     outage = await WaitOutTransportFailureAsync(ctx, ex, outage, ct).ConfigureAwait(false);
                     continue;
                 }
@@ -143,6 +154,9 @@ internal static partial class PartitionWorker
                     ctx.Monitor?.MarkCaughtUp();
                     continue;
                 }
+
+                // Progress for the stall clock: Redis answered and the read side is alive.
+                ctx.Monitor?.MarkFetched();
 
                 var batch = BuildBatch(in ctx, in filter, raw.Span);
 
@@ -228,7 +242,8 @@ internal static partial class PartitionWorker
         MultiStreamFetch fetch,
         CancellationToken ct,
         ResetSignal? resets = null,
-        Action<int>? rewind = null)
+        Action<int>? rewind = null,
+        ReaderRebuild? rebuildReader = null)
     {
         ArgumentNullException.ThrowIfNull(partitions);
         ArgumentNullException.ThrowIfNull(from);
@@ -320,8 +335,13 @@ internal static partial class PartitionWorker
                         // one Error line the whole outage gets.
                         for (var i = 1; i < count; i++)
                         {
-                            partitions[i].Monitor?.MarkBlocked();
+                            partitions[i].Monitor?.MarkTransportBlocked();
                         }
+                    }
+
+                    if (await RebuildPoisonedReaderAsync(partitions[0], ex, rebuildReader, ct).ConfigureAwait(false))
+                    {
+                        ResumeFromRecorded(partitions, positions, retired, rewind);
                     }
 
                     outage = await WaitOutTransportFailureAsync(partitions[0], ex, outage, ct).ConfigureAwait(false);
@@ -366,6 +386,7 @@ internal static partial class PartitionWorker
 
                     hint = slot + 1 == count ? 0 : slot + 1;
                     delivered[slot] = true;
+                    partitions[slot].Monitor?.MarkFetched();
 
                     if (retired[slot])
                     {
@@ -656,6 +677,32 @@ internal static partial class PartitionWorker
     }
 
     /// <summary>Finds the slot a reply's stream key belongs to, starting from <paramref name="hint"/>.</summary>
+    /// <summary>
+    /// Moves every partition of a co-located group back to the position its handler last recorded,
+    /// after the shared reader connection was rebuilt. Partitions without a monitor keep their cursor.
+    /// </summary>
+    private static void ResumeFromRecorded(
+        PartitionContext[] partitions,
+        StreamPosition[] positions,
+        bool[]? retired,
+        Action<int>? rewind)
+    {
+        for (var i = 0; i < partitions.Length; i++)
+        {
+            ref readonly var ctx = ref partitions[i];
+
+            if (ctx.Monitor is not { } recorded || (retired is not null && retired[i]))
+            {
+                continue;
+            }
+
+            var resume = recorded.Position;
+            rewind?.Invoke(ctx.Partition);
+            positions[i] = new StreamPosition(ctx.StreamKey, resume.Format());
+            LogResume(in ctx, resume);
+        }
+    }
+
     private static int SlotOf(PartitionContext[] partitions, in RedisKey key, int hint)
     {
         for (var i = hint; i < partitions.Length; i++)

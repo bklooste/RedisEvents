@@ -95,8 +95,56 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     private PositionFlusher? flusher;
     private OwnershipRegistry? ownership;
     private StreamReaderConnection? reader;
+
+    /// <summary>
+    /// The dedicated high-integrity connection that carries partition-ownership traffic and nothing
+    /// else: the ownership registry's lease script (renew, claim, give back, quarantine), its presence
+    /// field and release, and the position flusher's reads of the ownership hash. Opened at start,
+    /// disposed with the host.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why its own connection.</b> A lease reply decides who reads a partition; a reply that
+    /// belonged to another command must never be taken for one. StackExchange.Redis's
+    /// <c>highIntegrity</c> mode checks every reply with a checksum and reconnects on a mismatch, at
+    /// the cost of an ECHO per command. Ownership is a lease cycle every <c>LeaseRenewSeconds</c> plus
+    /// an occasional second-writer check, so the cost is nothing.
+    /// </para>
+    /// <para>
+    /// <b>Nothing else goes over it.</b> Publishes (<c>XADD</c>), position writes, reset markers,
+    /// admin and lag sampling stay on the shared connection, and stream reads on the reader
+    /// connection; paying an ECHO per command on those paths is not worth it. A position write that a
+    /// desynchronised reply misreports costs at most a redelivery, which at-least-once already allows.
+    /// </para>
+    /// </remarks>
+    private IConnectionMultiplexer? ownershipConnection;
     private Task[]? workers;
     private int recoveries;
+
+    /// <summary>
+    /// Monitors of partitions this host stood down for stalling, kept registered after the read side
+    /// let the partition go so the health check goes on reporting the stall. Dropped when the
+    /// partition is read again (its new monitor replaces this one) or the host stops.
+    /// </summary>
+    private readonly List<StreamPartitionMonitor> stalledOut = [];
+
+    /// <summary>Partitions whose stall has been logged, so a Static-mode stall logs once, not once a second.</summary>
+    private readonly HashSet<int> stallLogged = [];
+
+    /// <summary>The stall check loop; see <see cref="CheckStallsAsync"/>.</summary>
+    private Task? stallWatch;
+
+    /// <summary>
+    /// Set when a stall stood partitions down, so the next read side opens a fresh reader connection
+    /// instead of reusing one that may be what wedged.
+    /// </summary>
+    private bool recycleReader;
+
+    /// <summary>
+    /// Set by a stall stand-down: the next rebalance rebuilds the read side even if the held set
+    /// looks unchanged, because the stood-down partitions' workers are stopped either way.
+    /// </summary>
+    private bool rebuildReadSide;
 
     private bool disposed;
     private bool holdsSampler;
@@ -179,6 +227,12 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
     /// <summary>Whether the host has been started and not yet stopped.</summary>
     public bool IsRunning => this.cts is not null;
+
+    /// <summary>The high-integrity ownership connection, once started. Internal, for tests.</summary>
+    internal IConnectionMultiplexer? OwnershipConnection => this.ownershipConnection;
+
+    /// <summary>The dedicated reader connection, in <c>ReadMode.Block</c>. Internal, for tests.</summary>
+    internal StreamReaderConnection? ReaderConnection => this.reader;
 
     /// <summary>
     /// The position store this host was built with, if any — asserted directly by
@@ -385,8 +439,16 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             return;
         }
 
+        this.ownershipConnection ??= await this.connection
+            .ConnectHighIntegrityAsync(
+                StreamNames.OwnershipClientName(
+                    System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "unknown",
+                    this.consumerName,
+                    podName))
+            .ConfigureAwait(false);
+
         this.ownership = new OwnershipRegistry(
-            redis,
+            this.ownershipConnection,
             new OwnershipRegistryOptions
             {
                 Topic = topic,
@@ -402,6 +464,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             this.log);
 
         await this.ownership.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        this.StartStallWatch();
 
         if (leased)
         {
@@ -497,7 +561,11 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 onRecovered: this.OnPartitionRecovered,
                 recheckInterval: this.consumer.ContestedRecheckSeconds > 0
                     ? TimeSpan.FromSeconds(this.consumer.ContestedRecheckSeconds)
-                    : null);
+                    : null,
+
+                // Positions are written over the shared connection; only its reads of the
+                // ownership hash (who holds the partition, is the rival alive) are ownership traffic.
+                ownershipRedis: this.ownershipConnection);
 
             this.flusher.Start();
         }
@@ -600,6 +668,10 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         this.workers = started;
+
+        // A partition read again has a fresh monitor registered under its key by now, so a stalled-
+        // out one retained for it describes a read side that no longer exists.
+        this.stalledOut.RemoveAll(m => Array.IndexOf(owned, m.Partition) >= 0);
 
         // R-05. Nothing else starts the sampler, so without this streams.lag.ms, streams.lag.entries
         // and streams.stream.length are never emitted in a real service and the health check's
@@ -832,14 +904,20 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 return;
             }
 
-            int[] owned = [.. registry.Held];
+            // Never a quarantined partition, even one the registry still lists because the cycle
+            // that gives it up has not landed yet: its lease is going whether or not that cycle
+            // reaches Redis, and a read side started on it would be torn down again moments later.
+            var quarantined = registry.Quarantined;
+            int[] owned = [.. registry.Held.Where(p => !quarantined.Contains(p))];
 
-            if (SameSet(this.OwnedPartitions, owned))
+            if (SameSet(this.OwnedPartitions, owned) && !this.rebuildReadSide)
             {
                 // Two notifications collapsed into one rebalance, or the start already ran on this
                 // set. Nothing to do, and nothing to log about.
                 return;
             }
+
+            this.rebuildReadSide = false;
 
             var budget = TimeSpan.FromSeconds(this.consumer.ShutdownTimeoutSeconds > 0
                 ? this.consumer.ShutdownTimeoutSeconds
@@ -853,6 +931,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 owned.Length == 0 ? "[]" : string.Join(',', owned));
 
             await this.StopReadSideAsync(budget, CancellationToken.None).ConfigureAwait(false);
+            await this.RecycleReaderIfStalledAsync().ConfigureAwait(false);
 
             this.OwnedPartitions = owned;
 
@@ -1019,6 +1098,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // One source for the whole group — see the remarks. Linked to the host's, so StopAsync still
         // winds the group down the ordinary way.
         var groupCts = CancellationTokenSource.CreateLinkedTokenSource(this.workerCts!.Token);
+        var generation = this.workerCts.Token;
 
         for (var i = 0; i < count; i++)
         {
@@ -1053,7 +1133,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 this.consumer.UnhealthyStoppedSeconds,
                 this.consumer.UnhealthyBehindSeconds,
                 startPosition: from[i],
-                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds);
+                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds,
+                unhealthyStalledSeconds: this.consumer.UnhealthyStalledSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1090,14 +1171,18 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         MultiStreamFetch fetch;
+        ReaderRebuild? rebuildReader = null;
 
         if (this.consumer.ReadMode == ReadMode.Block)
         {
-            fetch = new BlockFetch(
+            var block = new BlockFetch(
                 this.reader ?? throw new StreamConfigurationException(
                     $"Streams: consumer '{this.consumerName}' is in ReadMode.Block but no reader connection was opened."),
                 keys,
-                batchSize).FetchManyAsync;
+                batchSize);
+
+            fetch = block.FetchManyAsync;
+            rebuildReader = block.RebuildReaderAsync;
         }
         else
         {
@@ -1112,10 +1197,11 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             count,
             this.consumer.ReadMode);
 
-        var reading = PartitionWorker.ReadGroupLoopAsync(contexts, from, fetch, groupCts.Token, resets, this.RewindNotifier());
+        var reading = PartitionWorker.ReadGroupLoopAsync(
+            contexts, from, fetch, groupCts.Token, resets, this.RewindNotifier(), rebuildReader);
 
         _ = reading.ContinueWith(
-            faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located read loop"),
+            faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located read loop", generation),
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted,
             TaskScheduler.Default);
@@ -1155,7 +1241,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 TaskScheduler.Default);
 
             _ = processing.ContinueWith(
-                faulted => this.OnLoopFaulted(faulted, ctx.Partition, "the worker"),
+                faulted => this.OnLoopFaulted(faulted, ctx.Partition, "the worker", generation),
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted,
                 TaskScheduler.Default);
@@ -1201,6 +1287,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // One source for the whole group, exactly as StartCoLocatedGroup: the partitions share a
         // read, so standing one of them down has to stand the read down too.
         var groupCts = CancellationTokenSource.CreateLinkedTokenSource(this.workerCts!.Token);
+        var generation = this.workerCts.Token;
 
         for (var i = 0; i < count; i++)
         {
@@ -1227,7 +1314,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 this.consumer.UnhealthyStoppedSeconds,
                 this.consumer.UnhealthyBehindSeconds,
                 startPosition: from[i],
-                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds);
+                degradedSilenceSeconds: this.consumer.DegradedSilenceSeconds,
+                unhealthyStalledSeconds: this.consumer.UnhealthyStalledSeconds);
 
             this.monitors.Add(monitor);
 
@@ -1266,6 +1354,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         }
 
         MultiStreamFetch fetch;
+        ReaderRebuild? rebuildReader = null;
 
         if (this.consumer.ReadMode == ReadMode.Block)
         {
@@ -1275,11 +1364,14 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 keys[i] = contexts[i].StreamKey;
             }
 
-            fetch = new BlockFetch(
+            var block = new BlockFetch(
                 this.reader ?? throw new StreamConfigurationException(
                     $"Streams: consumer '{this.consumerName}' is in ReadMode.Block but no reader connection was opened."),
                 keys,
-                batchSize).FetchManyAsync;
+                batchSize);
+
+            fetch = block.FetchManyAsync;
+            rebuildReader = block.RebuildReaderAsync;
         }
         else
         {
@@ -1305,10 +1397,11 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             this.consumer.Persist,
             flush,
             resets,
-            this.RewindNotifier());
+            this.RewindNotifier(),
+            rebuildReader);
 
         _ = reading.ContinueWith(
-            faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located inline read loop"),
+            faulted => this.OnLoopFaulted(faulted, partition: null, "the co-located inline read loop", generation),
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted,
             TaskScheduler.Default);
@@ -1357,6 +1450,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         Func<CancellationToken, ValueTask<StreamEntryBatch>> fetch;
         ResetSeek? seek;
+        ReaderRebuild? rebuildReader = null;
         PositionRecorder recorder;
         PositionFlush? flush;
 
@@ -1399,6 +1493,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
                 fetch = block.FetchAsync;
                 seek = block.SeekTo;
+                rebuildReader = block.RebuildReaderAsync;
             }
             else
             {
@@ -1442,7 +1537,8 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             // compare. The behind-the-tail rule is off there whatever the option says.
             useGroup ? 0 : this.consumer.UnhealthyBehindSeconds,
             startPosition: from,
-            degradedSilenceSeconds: useGroup ? 0 : this.consumer.DegradedSilenceSeconds);
+            degradedSilenceSeconds: useGroup ? 0 : this.consumer.DegradedSilenceSeconds,
+            unhealthyStalledSeconds: this.consumer.UnhealthyStalledSeconds);
 
         this.monitors.Add(monitor);
 
@@ -1464,6 +1560,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // One source per partition, so the flusher's second-writer detection can stand a single
         // partition down without touching its siblings.
         var partitionCts = CancellationTokenSource.CreateLinkedTokenSource(this.workerCts!.Token);
+        var generation = this.workerCts.Token;
         var runner = new PartitionRunner(partition, partitionCts, channel?.Writer);
         this.runners.Add(runner);
 
@@ -1485,11 +1582,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
                 flush,
                 resets,
                 seek,
-                this.RewindNotifier());
+                this.RewindNotifier(),
+                rebuildReader);
         }
         else
         {
-            var reading = PartitionWorker.ReadLoopAsync(ctx, from, fetch, partitionCts.Token, resets, seek, this.RewindNotifier());
+            var reading = PartitionWorker.ReadLoopAsync(
+                ctx, from, fetch, partitionCts.Token, resets, seek, this.RewindNotifier(), rebuildReader);
             var channelReader = channel.Reader;
 
             // Task.Run: handler code starts on the standard ThreadPool, never on a reader thread.
@@ -1520,7 +1619,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         // A worker only faults on ErrorPolicy.Fail or a transport error the loops chose not to
         // swallow; either way it must be visible immediately rather than at shutdown.
         _ = worker.ContinueWith(
-            faulted => this.OnLoopFaulted(faulted, partition, "the worker"),
+            faulted => this.OnLoopFaulted(faulted, partition, "the worker", generation),
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted,
             TaskScheduler.Default);
@@ -1623,7 +1722,18 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// <param name="faulted">The faulted task; only its exception is read.</param>
     /// <param name="partition">The partition, or <see langword="null"/> for a whole-group read loop.</param>
     /// <param name="what">What faulted, for the log line: "the worker", "the co-located read loop".</param>
+    /// <param name="generation">
+    /// The token of the read-side generation the loop belonged to. A loop of a generation that is
+    /// already being taken down — a rebalance, a stall stand-down — is reported and goes no further.
+    /// </param>
     /// <remarks>
+    /// <para>
+    /// <b>A fault the policy does not make fatal used to stop at the log line</b>, and the partition
+    /// stayed dead with its lease renewed for as long as the pod stayed up — nothing else ever looked
+    /// at it, and no other instance could claim it. It is now stood down the way a stall is (see
+    /// <see cref="StandDownStalled"/>): graded Unhealthy at once and, in <c>Lease</c> mode, handed
+    /// to another instance.
+    /// </para>
     /// <para>
     /// <b>R-03.</b> <see cref="ErrorPolicy.Fail"/> is documented as "fault the host so Kubernetes
     /// restarts the pod", and until this existed it was nothing of the kind: the processing loop
@@ -1645,7 +1755,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// noise at best.
     /// </para>
     /// </remarks>
-    private void OnLoopFaulted(Task faulted, int? partition, string what)
+    private void OnLoopFaulted(Task faulted, int? partition, string what, CancellationToken generation)
     {
         var error = faulted.Exception?.GetBaseException();
 
@@ -1666,6 +1776,17 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         if (!fatal)
         {
+            if (!generation.IsCancellationRequested)
+            {
+                // A dead worker reads nothing however long it is left, so there is no point waiting
+                // out the stall window for it: stand it down now.
+                _ = Task.Run(
+                    () => this.StandDownAsync(
+                        partition is { } one ? [one] : null,
+                        $"{what} faulted with {error.GetType().Name}: {error.Message}"),
+                    CancellationToken.None);
+            }
+
             return;
         }
 
@@ -1828,6 +1949,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
 
         this.monitors.Clear();
 
+        foreach (var monitor in this.stalledOut)
+        {
+            StreamLag.Forget(monitor);
+        }
+
+        this.stalledOut.Clear();
+
         // After the monitors are forgotten, so the last sample cannot resurrect a gauge for a
         // partition this pod no longer owns.
         if (this.holdsSampler)
@@ -1846,6 +1974,13 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         {
             await claims.DisposeAsync().ConfigureAwait(false);
             this.ownership = null;
+        }
+
+        // After the registry, whose final release runs over it.
+        if (this.ownershipConnection is { } verified)
+        {
+            this.ownershipConnection = null;
+            await verified.DisposeAsync().ConfigureAwait(false);
         }
 
         if (this.reader is { } connected)
@@ -2059,6 +2194,342 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
     /// This instance's name inside a consumer group. Must be stable across a restart, or a bounced
     /// pod's pending entries wait for the claim sweep instead of resuming directly.
     /// </summary>
+    /// <summary>How often the stall check runs. The thresholds it applies are whole seconds.</summary>
+    internal static TimeSpan StallCheckInterval => TimeSpan.FromSeconds(1);
+
+    /// <summary>Starts the stall check loop, once per host, when the stall rule is on.</summary>
+    private void StartStallWatch()
+    {
+        if (this.stallWatch is { IsCompleted: false } || this.consumer.UnhealthyStalledSeconds <= 0 || this.cts is not { } source)
+        {
+            return;
+        }
+
+        var token = source.Token;
+        this.stallWatch = Task.Run(() => this.WatchStallsAsync(token), CancellationToken.None);
+    }
+
+    /// <summary>Runs <see cref="CheckStallsAsync"/> every <see cref="StallCheckInterval"/> until the host stops.</summary>
+    private async Task WatchStallsAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(StallCheckInterval);
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    await this.CheckStallsAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Never let the check die: it is the only thing that frees a wedged partition.
+                    this.log.LogWarning(
+                        ex,
+                        "Streams: the stall check for consumer {Consumer} on topic {Topic} failed; it runs again in {IntervalMs}ms.",
+                        this.consumerName,
+                        this.consumer.Topic,
+                        (long)StallCheckInterval.TotalMilliseconds);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The host is stopping.
+        }
+    }
+
+    /// <summary>
+    /// One pass of the stall rule: feed each partition's monitor how long position writes have been
+    /// failing, find the partitions past <see cref="ConsumerOptions.UnhealthyStalledSeconds"/>, and
+    /// stand them down.
+    /// </summary>
+    /// <returns>A task that completes when the pass, and any stand-down it started, is done.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The defect this closes.</b> In <c>Lease</c> mode the ownership registry renews every lease
+    /// this instance holds from its own timer, with a script that only has to reach Redis — it never
+    /// asks whether anything behind it is reading. A worker that could not make progress (reads
+    /// timing out, a reply the client could not parse, a handler that never returned) therefore
+    /// kept its partitions for as long as the process stayed up, and no other replica could take
+    /// them: on 2026-10-25 offer-odds-projection's two <c>mult_feed_odds</c> partitions sat with one
+    /// such pod for four hours. The health check could not see it either: behind-the-tail needs a
+    /// fresh tail sample from the same Redis connection, and stands down when there is none.
+    /// </para>
+    /// <para>
+    /// <b>Under Static</b> there is no lease to give up; the monitor's own stall clock grades the
+    /// partition Unhealthy and the orchestrator restarts the pod. This pass only logs it, once.
+    /// </para>
+    /// </remarks>
+    internal async Task CheckStallsAsync()
+    {
+        var thresholdMs = this.consumer.UnhealthyStalledSeconds * 1000d;
+
+        if (thresholdMs <= 0 || this.stopping || this.disposed)
+        {
+            return;
+        }
+
+        // Never wait: a rebalance holding the gate is already rebuilding the read side, and the next
+        // tick sees the result.
+        if (!await this.rebalanceGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        List<int>? stalled = null;
+        double worstMs = 0;
+
+        try
+        {
+            if (this.stopping || this.cts is null)
+            {
+                return;
+            }
+
+            var unpersisted = this.flusher?.FailingFor ?? TimeSpan.Zero;
+
+            foreach (var monitor in this.monitors)
+            {
+                monitor.SetPersistFailing(unpersisted);
+
+                var stalledMs = monitor.StalledMs;
+
+                if (stalledMs < thresholdMs)
+                {
+                    this.stallLogged.Remove(monitor.Partition);
+                    continue;
+                }
+
+                (stalled ??= []).Add(monitor.Partition);
+                worstMs = Math.Max(worstMs, stalledMs);
+            }
+
+            if (stalled is null)
+            {
+                return;
+            }
+
+            if (this.ownership is not { } registry || (this.consumer.Instances?.Mode ?? InstanceMode.Lease) != InstanceMode.Lease)
+            {
+                var fresh = stalled.FindAll(p => this.stallLogged.Add(p));
+
+                if (fresh.Count > 0)
+                {
+                    this.log.LogError(
+                        "Streams: consumer {Consumer} on topic {Topic} partitions {Partitions} have made no progress for {StalledSeconds}s — " +
+                        "no read returned and no batch completed{Unpersisted} — past UnhealthyStalledSeconds of {Threshold}. The health check " +
+                        "reports Unhealthy; Instances:Mode=Static has no lease to hand on, so a restart is what moves them.",
+                        this.consumerName,
+                        this.consumer.Topic,
+                        string.Join(',', fresh),
+                        (long)(worstMs / 1000),
+                        unpersisted > TimeSpan.Zero ? $", or position writes failing for {(long)unpersisted.TotalSeconds}s" : string.Empty,
+                        this.consumer.UnhealthyStalledSeconds);
+                }
+
+                return;
+            }
+
+            var reason = unpersisted > TimeSpan.Zero
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"stalled: no progress for {(long)(worstMs / 1000)}s — position writes failing for {(long)unpersisted.TotalSeconds}s")
+                : string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"stalled: no progress for {(long)(worstMs / 1000)}s — no read returned and no batch completed");
+
+            this.StandDownStalled(registry, stalled, reason);
+        }
+        finally
+        {
+            this.rebalanceGate.Release();
+        }
+
+        if (stalled is not null && this.ownership is { } claims)
+        {
+            await this.ForceLeaseCycleAsync(claims).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Stands partitions down from outside the stall check — a worker that faulted — and hands them
+    /// on. <see langword="null"/> means every partition the current read side runs.
+    /// </summary>
+    /// <param name="partitions">The partitions, or <see langword="null"/> for all of them.</param>
+    /// <param name="reason">Why, for the log line and the health check.</param>
+    /// <returns>A task that completes when the stand-down, and the lease cycle it forces, are done.</returns>
+    private async Task StandDownAsync(int[]? partitions, string reason)
+    {
+        await this.rebalanceGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+
+        try
+        {
+            if (this.stopping || this.disposed || this.cts is null)
+            {
+                return;
+            }
+
+            var targets = partitions ?? [.. this.monitors.Select(m => m.Partition)];
+
+            if (targets.Length == 0)
+            {
+                return;
+            }
+
+            if (this.ownership is { } registry && (this.consumer.Instances?.Mode ?? InstanceMode.Lease) == InstanceMode.Lease)
+            {
+                this.StandDownStalled(registry, [.. targets], reason);
+            }
+            else
+            {
+                // Static: no lease to give up, but the partition is dead and must say so. Marking it
+                // stalled-out grades it Unhealthy now rather than after the stall window.
+                foreach (var monitor in this.monitors)
+                {
+                    if (Array.IndexOf(targets, monitor.Partition) >= 0)
+                    {
+                        monitor.MarkStalledOut(reason);
+                    }
+                }
+
+                return;
+            }
+        }
+        finally
+        {
+            this.rebalanceGate.Release();
+        }
+
+        if (this.ownership is { } claims)
+        {
+            await this.ForceLeaseCycleAsync(claims).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The Lease-mode stand-down; the caller holds <see cref="rebalanceGate"/>. Marks each partition
+    /// stalled-out and keeps its monitor registered, stops its worker, quarantines it in the
+    /// ownership registry, and asks for a fresh reader connection on the next read side.
+    /// </summary>
+    /// <param name="registry">The ownership registry.</param>
+    /// <param name="partitions">The partitions to stand down.</param>
+    /// <param name="reason">Why, for the log line and the health check.</param>
+    /// <remarks>
+    /// The forced lease cycle that follows (outside the gate) gives the leases up and, because the
+    /// held set changes, starts the ordinary rebalance that takes the read side down and back up on
+    /// what is left. Should that cycle not reach Redis, the leases are simply not renewed and lapse
+    /// within <c>LeaseTtlSeconds</c> — either way another instance can claim them.
+    /// </remarks>
+    private void StandDownStalled(OwnershipRegistry registry, List<int> partitions, string reason)
+    {
+        var ttl = this.consumer.Instances?.LeaseTtlSeconds ?? InstanceOptions.DefaultLeaseTtlSeconds;
+
+        // Long enough that a single replica stays Unhealthy for a whole stall window — long enough for
+        // any liveness probe or watchdog to act on — before it tries the partitions again itself.
+        var quarantine = TimeSpan.FromSeconds(Math.Max(2 * ttl, this.consumer.UnhealthyStalledSeconds));
+
+        for (var i = this.monitors.Count - 1; i >= 0; i--)
+        {
+            var monitor = this.monitors[i];
+
+            if (!partitions.Contains(monitor.Partition))
+            {
+                continue;
+            }
+
+            monitor.MarkStalledOut(reason);
+
+            // Out of the read side's list, so the rebalance does not forget it: the health check has
+            // to keep seeing the stall after the lease is gone.
+            this.monitors.RemoveAt(i);
+            this.stalledOut.Add(monitor);
+        }
+
+        foreach (var runner in this.runners)
+        {
+            if (partitions.Contains(runner.Partition))
+            {
+                runner.Stop();
+                runner.CompleteWriter();
+            }
+        }
+
+        registry.Quarantine(partitions, quarantine);
+        this.recycleReader = true;
+        this.rebuildReadSide = true;
+
+        this.log.LogError(
+            "Streams: consumer {Consumer} on topic {Topic} is giving up its lease on partitions {Partitions} ({Reason}). Another " +
+            "instance claims them within {RenewSeconds}s; this instance will not take them back for {QuarantineSeconds}s, and its " +
+            "health check reports Unhealthy (rule Stalled) until it reads them again or restarts. A restart rebuilds its Redis " +
+            "connections, which is what usually wedged.",
+            this.consumerName,
+            this.consumer.Topic,
+            string.Join(',', partitions),
+            reason,
+            this.consumer.Instances?.LeaseRenewSeconds ?? InstanceOptions.DefaultLeaseRenewSeconds,
+            (long)quarantine.TotalSeconds);
+    }
+
+    /// <summary>
+    /// Runs a lease cycle now, so a quarantine releases its leases without waiting for the timer, and
+    /// then rebuilds the read side on what is left — whether or not the cycle reached Redis.
+    /// </summary>
+    private async Task ForceLeaseCycleAsync(OwnershipRegistry registry)
+    {
+        try
+        {
+            await registry.RefreshAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The renewal loop runs the same cycle again shortly, and leases it cannot renew lapse on
+            // their own — which hands the partitions on just the same.
+            this.log.LogWarning(
+                ex,
+                "Streams: could not run the lease cycle that gives up stalled partitions of consumer {Consumer} on topic {Topic}; " +
+                "they are no longer renewed and lapse within {TtlSeconds}s.",
+                this.consumerName,
+                this.consumer.Topic,
+                this.consumer.Instances?.LeaseTtlSeconds ?? InstanceOptions.DefaultLeaseTtlSeconds);
+        }
+
+        // A cycle that changed the held set has queued this already; the second collapses into it.
+        await this.RebalanceAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Disposes the reader connection when a stall asked for it, so the next read side opens a fresh
+    /// one; the caller holds <see cref="rebalanceGate"/> and has already taken the read side down.
+    /// </summary>
+    private async Task RecycleReaderIfStalledAsync()
+    {
+        if (!this.recycleReader)
+        {
+            return;
+        }
+
+        this.recycleReader = false;
+
+        if (this.reader is not { } stale)
+        {
+            return;
+        }
+
+        this.reader = null;
+
+        try
+        {
+            await stale.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            this.log.LogDebug(ex, "Streams: disposing the reader connection of consumer {Consumer} after a stall failed.", this.consumerName);
+        }
+    }
+
     private string InstanceName() =>
         Environment.GetEnvironmentVariable(InstanceResolver.PodNameVariable) is { Length: > 0 } pod
             ? pod

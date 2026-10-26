@@ -206,4 +206,33 @@ public readonly record struct StreamPartitionStatus
     /// This is what <c>ConsumerOptions.UnhealthyBehindSeconds</c> is compared against.
     /// </remarks>
     public double BehindMs { get; init; }
+
+    /// <summary>
+    /// This consumer's <c>ConsumerOptions.UnhealthyStalledSeconds</c>; 0 means the stall rule is off
+    /// for it.
+    /// </summary>
+    public int UnhealthyStalledSeconds { get; init; }
+
+    /// <summary>
+    /// Milliseconds this partition has gone without any progress — no read returning, no batch
+    /// completing — or with its position writes failing, whichever is longer; 0 when the rule does
+    /// not apply to its state.
+    /// </summary>
+    /// <remarks>
+    /// Measured on this process's own clock, not against a tail sampled from Redis, so it still
+    /// reads true when this process cannot reach Redis at all. An idle consumer completes an empty
+    /// read every <c>BlockMs</c>, so a quiet topic never accumulates it. A partition blocked retrying
+    /// a <c>DontIgnoreException</c> reads 0 — <see cref="UnhealthyBlockSeconds"/> grades that — and
+    /// so does a stopped one, unless the stall rule itself stood it down
+    /// (<see cref="StoodDownStalled"/>). This is what <see cref="UnhealthyStalledSeconds"/> is
+    /// compared against.
+    /// </remarks>
+    public double StalledMs { get; init; }
+
+    /// <summary>
+    /// Whether this instance stood the partition down because it stalled — and, in <c>Lease</c>
+    /// mode, gave its lease up so another instance reads it. Graded Unhealthy until this instance
+    /// reads the partition again or restarts.
+    /// </summary>
+    public bool StoodDownStalled { get; init; }
 }

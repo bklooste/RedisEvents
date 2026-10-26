@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using Microsoft.Extensions.Logging;
@@ -70,10 +71,19 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
     /// </summary>
     private const int TimeoutMarginMs = 5_000;
 
-    private readonly IConnectionMultiplexer multiplexer;
-    private readonly IDatabase db;
+    /// <summary>How soon after a rebuild the next one may run, whatever generation it names.</summary>
+    private static readonly TimeSpan RebuildFloor = TimeSpan.FromSeconds(1);
+
     private readonly SocketManager? socketManager;
     private readonly bool ownsMultiplexer;
+    private readonly SemaphoreSlim rebuildGate = new(1, 1);
+    private IConnectionMultiplexer multiplexer;
+    private IDatabase db;
+    private ConfigurationOptions? configuration;
+    private IRedisTracingApplier? tracingApplier;
+    private ILogger? logger;
+    private long generation;
+    private long rebuiltAt;
     private bool disposed;
 
     /// <summary>
@@ -130,7 +140,105 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
     public int ReaderThreads { get; }
 
     /// <summary>Whether the underlying connection is currently established.</summary>
-    public bool IsConnected => !this.disposed && this.multiplexer.IsConnected;
+    public bool IsConnected => !this.disposed && Volatile.Read(ref this.multiplexer).IsConnected;
+
+    /// <summary>
+    /// Which connection is live: 0 for the one this reader opened with, incremented by every
+    /// <see cref="RebuildAsync"/>. A fetch notes it when it issues a read, so a rebuild it asks for
+    /// afterwards can tell whether someone already replaced the connection that answered it.
+    /// </summary>
+    public long Generation => Interlocked.Read(ref this.generation);
+
+    /// <summary>
+    /// The live connection's configuration string (password included). Internal, for tests: a string
+    /// rather than the multiplexer, so this type still hands out no way to issue a command.
+    /// </summary>
+    internal string Configuration => Volatile.Read(ref this.multiplexer).Configuration;
+
+    /// <summary>
+    /// Replaces the underlying connection with a fresh one opened from the same configuration, and
+    /// closes the old one.
+    /// </summary>
+    /// <param name="seenGeneration">
+    /// The <see cref="Generation"/> the caller's poisoned reply came from. When the connection has
+    /// moved on since — several read loops share this connection, and the first to see the bad reply
+    /// has already rebuilt it — nothing is done.
+    /// </param>
+    /// <param name="reason">Why, for the log line.</param>
+    /// <param name="ct">Cancellation for the wait and the connect.</param>
+    /// <returns><see langword="true"/> when this call replaced the connection.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why rebuild rather than retry.</b> RESP carries no request/response correlation. Once a
+    /// connection's replies have slipped against its requests every later reply lands on the wrong
+    /// command, and nothing in StackExchange.Redis notices without <c>highIntegrity</c>, which this
+    /// connection does not pay for. Backing off on the same socket only gets more wrong replies. A new
+    /// connection starts in step by construction.
+    /// </para>
+    /// <para>
+    /// The socket manager (and with it the reader thread) is kept: it carries no per-connection state.
+    /// A read in flight on the old connection fails with a connection error, which its loop treats as
+    /// a transport blip and retries — on the new one.
+    /// </para>
+    /// </remarks>
+    internal async ValueTask<bool> RebuildAsync(long seenGeneration, string reason, CancellationToken ct)
+    {
+        if (this.disposed || this.configuration is not { } template)
+        {
+            // Wrapped around a multiplexer somebody else built (a test double): nothing to rebuild from.
+            return false;
+        }
+
+        await this.rebuildGate.WaitAsync(ct).ConfigureAwait(false);
+
+        try
+        {
+            if (this.disposed || Interlocked.Read(ref this.generation) != seenGeneration)
+            {
+                return false;
+            }
+
+            var last = Interlocked.Read(ref this.rebuiltAt);
+            if (last != 0 && Stopwatch.GetElapsedTime(last) < RebuildFloor)
+            {
+                return false;
+            }
+
+            var fresh = await ConnectionMultiplexer.ConnectAsync(template.Clone()).ConfigureAwait(false);
+            this.tracingApplier?.ApplyTracing(fresh);
+
+            var stale = Volatile.Read(ref this.multiplexer);
+            Volatile.Write(ref this.db, fresh.GetDatabase());
+            Volatile.Write(ref this.multiplexer, fresh);
+            Interlocked.Increment(ref this.generation);
+            Interlocked.Exchange(ref this.rebuiltAt, Stopwatch.GetTimestamp());
+
+            this.logger?.LogWarning(
+                "Streams: rebuilt the dedicated reader connection {ClientName} ({Reason}). Its replies could no longer be trusted to " +
+                "match its requests, so the read loops resume from the positions their handlers last recorded, on a connection that " +
+                "starts in step.",
+                this.ClientName,
+                reason);
+
+            if (this.ownsMultiplexer)
+            {
+                try
+                {
+                    await stale.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    this.logger?.LogDebug(ex, "Streams: closing the replaced reader connection {ClientName} failed.", this.ClientName);
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            this.rebuildGate.Release();
+        }
+    }
 
     /// <summary>
     /// Opens a dedicated reader connection for one consumer.
@@ -166,7 +274,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
             tracingApplier?.ApplyTracing(connected);
             
             Log(logger, plan, connected);
-            return Wrap(plan, connected);
+            return Wrap(plan, connected, tracingApplier, logger);
         }
         catch (Exception ex) when (ex is not StreamConfigurationException)
         {
@@ -213,7 +321,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
             tracingApplier?.ApplyTracing(connected);
             
             Log(logger, plan, connected);
-            return Wrap(plan, connected);
+            return Wrap(plan, connected, tracingApplier, logger);
         }
         catch (Exception ex) when (ex is not StreamConfigurationException)
         {
@@ -246,7 +354,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
 
         // DemandMaster: streams must be read from the primary — a replica can lag arbitrarily and
         // would silently hand the consumer a stale tail.
-        return this.db.ExecuteAsync(XReadCommand, args, CommandFlags.DemandMaster);
+        return Volatile.Read(ref this.db).ExecuteAsync(XReadCommand, args, CommandFlags.DemandMaster);
     }
 
     /// <inheritdoc />
@@ -259,7 +367,7 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
 
         // Multiplexer first: its shutdown still needs the socket manager's thread to close cleanly.
         if (this.ownsMultiplexer)
-            this.multiplexer.Dispose();
+            Volatile.Read(ref this.multiplexer).Dispose();
 
         // A SocketManager handed to ConnectionMultiplexer is not owned by it, so it is ours to close.
         this.socketManager?.Dispose();
@@ -273,8 +381,17 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
 
         this.disposed = true;
 
-        if (this.ownsMultiplexer)
-            await this.multiplexer.DisposeAsync().ConfigureAwait(false);
+        await this.rebuildGate.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            if (this.ownsMultiplexer)
+                await Volatile.Read(ref this.multiplexer).DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            this.rebuildGate.Release();
+        }
 
         this.socketManager?.Dispose();
     }
@@ -334,10 +451,23 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         configuration.SocketManager = manager;
         configuration.ClientName = clientName;
 
+        configuration.HighIntegrity = false;
+
+        // Deliberately NOT highIntegrity, even when the connection string asks for it: an extra ECHO
+        // per XREAD is too much to pay on the hot read path. Desync on this connection is detected by validating every reply
+        // instead (BlockFetch: requested stream keys only, ids strictly after the cursor that was
+        // sent, scalar slots scalar), and a reply that fails it rebuilds this connection
+        // (RebuildAsync) — the ownership traffic, where a wrong reply must never be trusted, runs
+        // on its own highIntegrity connection.
+
         return new ReaderPlan(configuration, manager, clientName, threadName, blockMs, configuration.SyncTimeout, readerThreads);
     }
 
-    private static StreamReaderConnection Wrap(in ReaderPlan plan, IConnectionMultiplexer connected) =>
+    private static StreamReaderConnection Wrap(
+        in ReaderPlan plan,
+        IConnectionMultiplexer connected,
+        IRedisTracingApplier? tracingApplier,
+        ILogger? logger) =>
         new(
             connected,
             plan.SocketManager,
@@ -346,7 +476,13 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
             plan.ThreadName,
             plan.BlockMs,
             plan.TimeoutMs,
-            plan.ReaderThreads);
+            plan.ReaderThreads)
+        {
+            // Kept so RebuildAsync can open an identical connection; it shares the socket manager.
+            configuration = plan.Configuration,
+            tracingApplier = tracingApplier,
+            logger = logger,
+        };
 
     private static void Log(ILogger? logger, in ReaderPlan plan, IConnectionMultiplexer connected)
     {

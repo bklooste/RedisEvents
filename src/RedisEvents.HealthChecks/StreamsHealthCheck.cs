@@ -28,8 +28,10 @@ namespace RedisEvents.HealthChecks;
 ///   <description>No worker is running at all, the Redis connection is down, a partition has been
 ///   blocked for longer than <c>UnhealthyBlockSeconds</c> (default 300), a partition that stood down
 ///   outside any error policy has been stopped past <c>UnhealthyStoppedSeconds</c> with entries
-///   waiting, or a partition has sat behind the tail of its stream with a position that does not
-///   change for longer than <c>UnhealthyBehindSeconds</c> (default 0 = off).</description>
+///   waiting, a partition has sat behind the tail of its stream with a position that does not
+///   change for longer than <c>UnhealthyBehindSeconds</c> (default 0 = off), or a partition has made
+///   no progress at all — no read returning, no batch completing — for longer than
+///   <c>UnhealthyStalledSeconds</c> (default 300), or was stood down for it.</description>
 /// </item>
 /// </list>
 /// <para>

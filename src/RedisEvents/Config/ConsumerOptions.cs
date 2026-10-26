@@ -124,6 +124,40 @@ public sealed record ConsumerOptions
     public int UnhealthyBehindSeconds { get; set; }
 
     /// <summary>
+    /// Seconds a partition this instance owns may go without any progress before it is stalled
+    /// (default: 300; 0 turns the rule off). A stalled partition is graded Unhealthy, and in
+    /// <see cref="InstanceMode.Lease"/> mode the host also gives its lease up, so another instance
+    /// reads it while this one is restarted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Progress</b> is anything that shows the partition's pipeline still turns over: a read that
+    /// returned, with entries or without (an idle consumer in <see cref="ReadMode.Block"/> completes
+    /// an empty read every <see cref="BlockMs"/>, so a quiet topic never stalls), or a batch the
+    /// handler completed. Position writes that keep failing count as no progress too: a consumer
+    /// that reads and handles but cannot record where it got to is not making durable progress.
+    /// </para>
+    /// <para>
+    /// <b>Why it exists alongside <see cref="UnhealthyBehindSeconds"/>.</b> Behind-the-tail compares
+    /// against a tail sampled from Redis over this process's connection, and stands down when the
+    /// sample goes stale — so a consumer whose connection is timing out or returning garbage is
+    /// never failed by it, and its partitions stay leased to a process that cannot read them. This
+    /// rule runs on the process's own clock and needs nothing from Redis. It is on by default
+    /// because no healthy consumer ever goes this long without completing a read or a batch.
+    /// </para>
+    /// <para>
+    /// <b>What it leaves alone.</b> A partition blocked retrying a <c>DontIgnoreException</c> is
+    /// graded by <see cref="UnhealthyBlockSeconds"/> instead — it is doing what its handler asked —
+    /// and a partition its <see cref="ErrorPolicy"/> stopped is graded as stopped. A partition
+    /// whose <em>reads</em> keep failing is stalled: the block-and-retry on a Redis failure is what
+    /// keeps a Redis blip from killing a partition, and this is what stops it holding the lease for
+    /// hours when the blip is in this process rather than in Redis. Set it longer than the slowest
+    /// batch the handler can legitimately take: a batch that outlasts it looks exactly like a wedge.
+    /// </para>
+    /// </remarks>
+    public int UnhealthyStalledSeconds { get; set; } = 300;
+
+    /// <summary>
     /// Seconds a consumer may be caught up with its stream and receive nothing before health
     /// reports Degraded (default: 0, which turns the rule off).
     /// </summary>
