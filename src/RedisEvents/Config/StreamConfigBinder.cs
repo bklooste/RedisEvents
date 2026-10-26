@@ -331,6 +331,12 @@ internal static class StreamConfigBinder
                     "StreamAdmin.ResetPositionAsync (or the admin reset endpoint) with the consumer scaled to zero, then start it.");
             }
 
+            if (consumer.UnhealthyStalledSeconds < 0)
+            {
+                throw new StreamConfigurationException(
+                    $"{key}:UnhealthyStalledSeconds is {consumer.UnhealthyStalledSeconds}; it must be >= 0 (0 turns the stall rule off).");
+            }
+
             ValidateInstances(consumer.Instances, key);
 
             var topic = ResolveTopic(options, consumer.Topic, logger);

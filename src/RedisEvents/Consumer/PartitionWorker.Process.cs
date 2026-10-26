@@ -174,6 +174,11 @@ internal static partial class PartitionWorker
         // what the exception means. It now runs through the same try below as a real batch, and
         // InvokeAsync skips only the handler call.
         var empty = batch.IsEmpty;
+
+        // The in-flight clock for the stall rule: a handler that never returns is a stalled
+        // partition even while the reader, running ahead of it, keeps completing empty reads.
+        ctx.Monitor?.MarkBusy();
+
         var activity = empty ? null : StreamActivity.StartProcess(in span, batch.AsSpan(), batch.Last);
         var scope = empty ? null : StreamActivity.BeginCorrelationScope(ctx.Log, batch.AsSpan());
         var started = Stopwatch.GetTimestamp();
@@ -245,6 +250,7 @@ internal static partial class PartitionWorker
             // Step 5. The handler contract says the memory must not be retained past the await, so
             // the array goes back to the pool here whatever happened above.
             batch.Return();
+            ctx.Monitor?.MarkIdle();
 
             if (timing)
             {
@@ -927,9 +933,24 @@ internal static partial class PartitionWorker
     /// Deliberately narrow. A connection that dropped, a command that timed out, and a server that is
     /// loading, failing over or otherwise temporarily refusing reads all resolve on their own, and
     /// <c>06-errors-and-observability.md</c> lists "Redis unreachable, <c>XREAD</c> failing" as the
-    /// canonical block-and-retry case. Everything else — a malformed reply, a decode failure, a
-    /// configuration error — is a bug or a corruption, and retrying it forever would spin the reader
-    /// at full speed against a problem no amount of waiting fixes.
+    /// canonical block-and-retry case. A decode failure or a configuration error is a bug, and must
+    /// surface.
+    /// </para>
+    /// <para>
+    /// <b>A reply this client could not read is a transport failure too</b> (<see cref="IsUnreadableReply"/>).
+    /// It used to end the partition, on the theory that a malformed reply is a corruption no wait
+    /// fixes. But the corruption is in the connection, not in the stream: StackExchange.Redis says
+    /// in so many words that RESP carries no request/response correlation and "protocol
+    /// desynchronization can occur, which may not be noticed immediately", and once it has, every
+    /// reply lands on the wrong command and a typed reply processor throws
+    /// <c>InvalidCastException: Cannot convert to RedisValue: Array</c>. Ending the read loop on that
+    /// left the partition unread while the ownership lease — renewed by a script that never looks at
+    /// the read side — kept it away from every other instance (the 2026-10-25 offer-odds-projection
+    /// incident). Retried with the same 1 s → 30 s backoff it cannot spin; the connection gets the
+    /// chance to reconnect; and if it never recovers the stall rule
+    /// (<c>ConsumerOptions.UnhealthyStalledSeconds</c>) gives the lease up and fails the health
+    /// check. <see cref="Errors.StreamTransportException"/> is a <c>DontIgnoreException</c> for
+    /// exactly this reason: "block and retry" is what it means.
     /// </para>
     /// <para>
     /// <see cref="RedisServerException"/> is only transient for the handful of error prefixes Redis
@@ -944,6 +965,30 @@ internal static partial class PartitionWorker
             RedisConnectionException => true,
             RedisTimeoutException => true,
             RedisServerException server => IsTemporaryServerError(server.Message),
+            _ => IsUnreadableReply(ex),
+        };
+
+    /// <summary>
+    /// Whether a fetch failed because the reply could not be read — the signature of a garbled or
+    /// desynchronised connection rather than of anything in the stream.
+    /// </summary>
+    /// <remarks>
+    /// Three shapes: this library's own <see cref="Errors.StreamTransportException"/> for an
+    /// <c>XREAD</c> reply that is not in the documented shape; an <see cref="InvalidCastException"/>
+    /// out of StackExchange.Redis's reply processing (it attaches the offending reply as
+    /// <c>Data["got"]</c>), which is how a reply meant for another command shows up on a typed one;
+    /// and the error StackExchange.Redis's <c>highIntegrity</c> mode raises when it catches the
+    /// desync itself, before it reconnects.
+    /// </remarks>
+    /// <param name="ex">The exception the fetch threw.</param>
+    /// <returns><see langword="true"/> when the reply, not the request, is what failed.</returns>
+    internal static bool IsUnreadableReply(Exception ex)
+        => ex switch
+        {
+            Errors.StreamTransportException => true,
+            InvalidCastException cast => cast.Data.Contains("got")
+                || string.Equals(cast.Source, "StackExchange.Redis", StringComparison.Ordinal),
+            InvalidOperationException desync => desync.Message.Contains("de-sync", StringComparison.OrdinalIgnoreCase),
             _ => false,
         };
 
@@ -981,7 +1026,7 @@ internal static partial class PartitionWorker
 
         if (currentDelayMs == 0)
         {
-            ctx.Monitor?.MarkBlocked();
+            ctx.Monitor?.MarkTransportBlocked();
             CountError(in ctx, "transport", ex);
 
             ctx.Log.LogError(

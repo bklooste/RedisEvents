@@ -179,6 +179,12 @@ internal sealed class PositionFlusher : IAsyncDisposable
     private int contentionCount;
     private long flushes;
     private long failures;
+
+    /// <summary>
+    /// <see cref="Stopwatch"/> timestamp of the first failure in the current run of failed flushes, or
+    /// 0 when the last flush landed.
+    /// </summary>
+    private long failingSince;
     private long resetsApplied;
     private long recoveries;
     private int ticks;
@@ -344,6 +350,22 @@ internal sealed class PositionFlusher : IAsyncDisposable
     /// <summary>Flushes that threw and will be retried. Mirrors <c>streams.positions.flush_failures</c>.</summary>
     internal long Failures => Interlocked.Read(ref this.failures);
 
+    /// <summary>
+    /// How long position writes have been failing without one landing, or zero when the last flush
+    /// succeeded (or nothing has needed writing since). Read by the consumer host's stall check: a
+    /// consumer whose every position write fails is not making durable progress, however busy its
+    /// handler looks.
+    /// </summary>
+    internal TimeSpan FailingFor
+    {
+        get
+        {
+            var since = Volatile.Read(ref this.failingSince);
+
+            return since == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(since);
+        }
+    }
+
     /// <summary>Partitions stood down because a live second instance was writing them.</summary>
     /// <remarks>
     /// Strictly the partitions this instance <em>gave up</em>. A partition it kept after winning the
@@ -470,6 +492,9 @@ internal sealed class PositionFlusher : IAsyncDisposable
 
         if (Volatile.Read(ref this.dirtyCount) == 0 && !anyTaken)
         {
+            // Nothing waiting to be written, so nothing is failing to be: a failed flush re-queues
+            // what it drained, which keeps the count above zero until a write lands.
+            Volatile.Write(ref this.failingSince, 0);
             return;
         }
 
@@ -488,17 +513,25 @@ internal sealed class PositionFlusher : IAsyncDisposable
             count = this.Drain();
             if (count == 0)
             {
+                Volatile.Write(ref this.failingSince, 0);
                 return;
             }
 
             await this.WriteAsync(count, ct).ConfigureAwait(false);
             Interlocked.Increment(ref this.flushes);
+            Volatile.Write(ref this.failingSince, 0);
         }
         catch (Exception ex)
         {
             // Never fails a batch: re-queue what we drained and let the next tick try again.
             this.Requeue(count);
             Interlocked.Increment(ref this.failures);
+
+            if (ex is not OperationCanceledException)
+            {
+                Interlocked.CompareExchange(ref this.failingSince, Stopwatch.GetTimestamp(), 0);
+            }
+
             StreamsDiagnostics.StreamsPositionsFlushFailures.Add(1, this.topicTag, this.consumerTag);
 
             if (ex is not OperationCanceledException)

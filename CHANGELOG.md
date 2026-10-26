@@ -4,6 +4,50 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-26
+
+### Fixed
+
+- **A Lease-mode owner that stops making progress no longer keeps its partitions.** The ownership
+  registry renews every lease from its own timer with a script that only has to reach Redis; nothing
+  asked whether the read side behind it was reading. A consumer whose reads were timing out, whose
+  replies could not be parsed, or whose handler never returned therefore held its partitions for as
+  long as the process stayed up, and no other replica could claim them (offer-odds-projection,
+  2026-10-25: four hours, both `mult_feed_odds` partitions). The host now runs a stall check once a
+  second. A partition past the new `ConsumerOptions.UnhealthyStalledSeconds` is stood down: its worker is
+  stopped, the registry gives its lease up at once and quarantines it (no re-claim for
+  `max(2 × LeaseTtlSeconds, UnhealthyStalledSeconds)`), and while anything is quarantined the instance
+  withdraws its presence field, so the replica taking over is not capped at its old fair share. The next
+  read side gets a fresh reader connection.
+- **A worker that faults under a non-fatal policy is stood down too.** It used to stop at an `Error`
+  log line, leaving the partition dead while its lease stayed renewed. It is now graded Unhealthy at once
+  and, in Lease mode, handed on, the same way a stall is.
+- **A reply the client cannot read is a transport failure, not the end of the partition.** A garbled or
+  desynchronised connection shows up as `InvalidCastException: Cannot convert to RedisValue: Array`
+  from StackExchange.Redis's reply processing, or as a malformed `XREAD` reply. That used to fault the
+  read loop. The read loop now waits it out with the same 1 s → 30 s backoff as a timeout; the stall
+  rule bounds how long. The error contract is unchanged: only `DontIgnoreException` blocks a handler, and
+  `StreamTransportException` (the malformed-reply error) already was one.
+- **`BlockFetch` no longer lets an array in a scalar slot escape as a bare `InvalidCastException`.**
+  A stream key, entry id or field that arrives as an array is reported as a malformed reply
+  (`StreamTransportException`), as the parser already claimed to do.
+- **The dedicated reader connection runs with StackExchange.Redis `HighIntegrity` on.** That adds an ECHO
+  checksum after each `XREAD` and reconnects when a reply does not match, so a desync on the reader
+  heals itself instead of feeding every read the reply meant for another command.
+
+### Added
+
+- **`ConsumerOptions.UnhealthyStalledSeconds` (default 300; 0 = off) and health rule `Stalled`
+  (Unhealthy).** A partition this instance owns that has made no progress for that long is Unhealthy:
+  no read returned (empty reads count, so an idle topic never stalls), no batch completed, a batch held
+  by the handler for that long, or position writes failing for that long. It is measured on the
+  process's own clock and needs nothing from Redis, so it works when the tail sample behind
+  `UnhealthyBehindSeconds` cannot be read. A partition blocked retrying a `DontIgnoreException` is still
+  graded by `UnhealthyBlockSeconds`; a policy stop is still a stop. A partition stood down for stalling
+  stays Unhealthy (`StreamPartitionStatus.StoodDownStalled`) until this instance reads it again or
+  restarts. `StreamPartitionStatus` gains `StalledMs`, `UnhealthyStalledSeconds` and
+  `StoodDownStalled`; all are optional members with defaults.
+
 ## 2026-10-25
 
 ### Fixed

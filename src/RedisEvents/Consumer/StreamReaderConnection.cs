@@ -334,6 +334,14 @@ internal sealed class StreamReaderConnection : IDisposable, IAsyncDisposable
         configuration.SocketManager = manager;
         configuration.ClientName = clientName;
 
+        // StackExchange.Redis's own guard against a desynchronised connection: an ECHO of a checksum
+        // after every command, checked against the reply, and a reconnect when it does not match.
+        // RESP has no request/response correlation, so without it a connection whose replies have
+        // slipped by one hands every XREAD the reply meant for another command — read as a garbled
+        // reply, retried, and garbled again, for as long as the process lives. One extra command
+        // per XREAD BLOCK, on a connection that issues one per BlockMs, costs nothing measurable.
+        configuration.HighIntegrity = true;
+
         return new ReaderPlan(configuration, manager, clientName, threadName, blockMs, configuration.SyncTimeout, readerThreads);
     }
 

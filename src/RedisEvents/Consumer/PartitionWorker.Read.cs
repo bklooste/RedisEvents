@@ -144,6 +144,9 @@ internal static partial class PartitionWorker
                     continue;
                 }
 
+                // Progress for the stall clock: Redis answered and the read side is alive.
+                ctx.Monitor?.MarkFetched();
+
                 var batch = BuildBatch(in ctx, in filter, raw.Span);
 
                 // The channel write happens BEFORE the next fetch. When the processor falls behind,
@@ -320,7 +323,7 @@ internal static partial class PartitionWorker
                         // one Error line the whole outage gets.
                         for (var i = 1; i < count; i++)
                         {
-                            partitions[i].Monitor?.MarkBlocked();
+                            partitions[i].Monitor?.MarkTransportBlocked();
                         }
                     }
 
@@ -366,6 +369,7 @@ internal static partial class PartitionWorker
 
                     hint = slot + 1 == count ? 0 : slot + 1;
                     delivered[slot] = true;
+                    partitions[slot].Monitor?.MarkFetched();
 
                     if (retired[slot])
                     {

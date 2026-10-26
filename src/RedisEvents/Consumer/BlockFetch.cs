@@ -436,7 +436,7 @@ internal sealed class BlockFetch
             // arrived so the read loop can warn about it rather than silently mis-attributing it.
             unmatched = found;
             unmatchedCount++;
-            slices[found++] = new StreamSlice((byte[]?)(RedisValue)streamKey ?? [], batch.Entries, batch.Count);
+            slices[found++] = new StreamSlice((byte[]?)Scalar(streamKey, "a stream key") ?? [], batch.Entries, batch.Count);
         }
 
         // The single-key rescue, and the reason it is HERE rather than inside SlotOf. A single-stream
@@ -463,7 +463,7 @@ internal sealed class BlockFetch
     /// <summary>Finds the requested key a reply's stream key matches, starting from <paramref name="hint"/>.</summary>
     private static int SlotOf(RedisResult streamKey, byte[][] keyBytes, int hint)
     {
-        ReadOnlyMemory<byte> raw = (RedisValue)streamKey;
+        ReadOnlyMemory<byte> raw = Scalar(streamKey, "a stream key");
         var span = raw.Span;
 
         for (var i = hint; i < keyBytes.Length; i++)
@@ -586,7 +586,7 @@ internal sealed class BlockFetch
                 throw Malformed($"an entry held {entry.Length} items where '[id, fields]' was expected");
             }
 
-            var id = (RedisValue)entry[0];
+            var id = Scalar(entry[0], "an entry id");
 
             if (id.IsNull)
             {
@@ -632,7 +632,7 @@ internal sealed class BlockFetch
         for (var i = 0; i < pairs.Length; i++)
         {
             var at = i * 2;
-            pairs[i] = new NameValueEntry((RedisValue)fields[at], (RedisValue)fields[at + 1]);
+            pairs[i] = new NameValueEntry(Scalar(fields[at], "a field name"), Scalar(fields[at + 1], "a field value"));
         }
 
         return pairs;
@@ -655,9 +655,45 @@ internal sealed class BlockFetch
             return false;
         }
 
-        ReadOnlyMemory<byte> raw = (RedisValue)streamKey;
+        ReadOnlyMemory<byte> raw = Scalar(streamKey, "a stream key");
 
         return raw.Span.SequenceEqual(expectedKey);
+    }
+
+    /// <summary>
+    /// Reads one scalar slot of the reply — a stream key, an entry id, a field name or value —
+    /// refusing an array in its place.
+    /// </summary>
+    /// <remarks>
+    /// The plain <c>(RedisValue)</c> cast this replaces throws a bare <see cref="InvalidCastException"/>
+    /// for any array of more than one element, which escaped every shape check above: the read loop
+    /// does not know it as a transport failure, so a single garbled reply ended the partition for
+    /// good while its lease stayed renewed. An array where a scalar belongs is a reply that is not in
+    /// the <c>XREAD</c> shape, and is reported as one — a <see cref="StreamTransportException"/>,
+    /// which the read loop waits out like any other transport failure.
+    /// </remarks>
+    /// <param name="value">The reply element.</param>
+    /// <param name="what">What the slot holds, for the error.</param>
+    /// <returns>The scalar value.</returns>
+    /// <exception cref="StreamTransportException">The slot held an array.</exception>
+    private static RedisValue Scalar(RedisResult value, string what)
+    {
+        if (IsArray(value))
+        {
+            throw Malformed($"{what} arrived as an array of {value.Length} items where a single value was expected");
+        }
+
+        try
+        {
+            return (RedisValue)value;
+        }
+        catch (InvalidCastException ex)
+        {
+            throw new StreamTransportException(
+                $"Streams: the XREAD reply was not in the expected shape — {what} could not be read as a value ({ex.Message}). " +
+                "Refusing to guess, because a mis-parsed reply would leave the read cursor unmoved and spin the reader.",
+                ex);
+        }
     }
 
     private static StreamTransportException Malformed(string detail) =>

@@ -147,6 +147,8 @@ internal static partial class PartitionWorker
                     continue;
                 }
 
+                ctx.Monitor?.MarkFetched();
+
                 var batch = BuildBatch(in ctx, in filter, raw.Span);
 
                 // Where the channel write would be. The next fetch is not issued until the handler
@@ -288,7 +290,7 @@ internal static partial class PartitionWorker
                         // Error line the whole outage gets.
                         for (var i = 1; i < count; i++)
                         {
-                            partitions[i].Monitor?.MarkBlocked();
+                            partitions[i].Monitor?.MarkTransportBlocked();
                         }
                     }
 
@@ -345,6 +347,7 @@ internal static partial class PartitionWorker
                     delivered[slot] = true;
 
                     var ctx = partitions[slot];
+                    ctx.Monitor?.MarkFetched();
                     var batch = BuildBatch(in ctx, in filters[slot], reply[r].Span);
 
                     // Advance this partition's read cursor past everything READ, filtered-out

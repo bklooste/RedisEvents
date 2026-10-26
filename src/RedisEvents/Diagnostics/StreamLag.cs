@@ -80,6 +80,16 @@ internal sealed class StreamPartitionMonitor
     private int escalates;
     private string? stopReason;
 
+    // The stall clock: the last time this partition showed it can make progress at all — a read
+    // that came back (empty or not) or a batch that completed. Independent of the tail sample, so it
+    // keeps working when this process cannot reach Redis, which is exactly when the tail sample
+    // stops arriving.
+    private long progressAt;
+    private long busySince;
+    private int transportBlocked;
+    private int stalledOut;
+    private long persistFailingMs;
+
     // Progress against the stream's tail. Guarded by progressGate rather than Volatile: these are
     // read and written together, once a second at most, and never from the processing loop.
     private readonly Lock progressGate = new();
@@ -106,7 +116,8 @@ internal sealed class StreamPartitionMonitor
         int unhealthyBehindSeconds = 0,
         StreamId startPosition = default,
         TimeProvider? clock = null,
-        int degradedSilenceSeconds = 0)
+        int degradedSilenceSeconds = 0,
+        int unhealthyStalledSeconds = 0)
     {
         this.Topic = topic;
         this.Consumer = consumer;
@@ -117,6 +128,7 @@ internal sealed class StreamPartitionMonitor
         this.UnhealthyStoppedSeconds = unhealthyStoppedSeconds;
         this.UnhealthyBehindSeconds = unhealthyBehindSeconds;
         this.DegradedSilenceSeconds = degradedSilenceSeconds;
+        this.UnhealthyStalledSeconds = unhealthyStalledSeconds;
         this.clock = clock ?? TimeProvider.System;
         this.startPosition = startPosition;
         this.notedPosition = startPosition;
@@ -124,6 +136,10 @@ internal sealed class StreamPartitionMonitor
         // The frozen-position clock starts when this instance starts reading the partition — at
         // acquisition under Lease, not at process start: a monitor is created per acquisition.
         this.positionChangedAt = this.clock.GetTimestamp();
+
+        // So does the stall clock: a partition that never manages its first read is stalled from
+        // the moment it was acquired, not from process start.
+        this.progressAt = this.positionChangedAt;
         this.MetricKey = StreamLag.Key(topic, consumer, partition);
         this.StreamMetricKey = string.Concat(topic, ":", partition.ToString(CultureInfo.InvariantCulture));
     }
@@ -166,6 +182,75 @@ internal sealed class StreamPartitionMonitor
     /// check reports Degraded; 0 turns the rule off.
     /// </summary>
     internal int DegradedSilenceSeconds { get; }
+
+    /// <summary>
+    /// Seconds this partition may go without any progress — no read returning, no batch completing,
+    /// no position write landing — before it is stalled: the health check reports Unhealthy and, in
+    /// <c>Lease</c> mode, the host gives its lease up. 0 turns the rule off.
+    /// </summary>
+    internal int UnhealthyStalledSeconds { get; }
+
+    /// <summary>
+    /// Milliseconds this partition has gone without progress, or 0 when the stall rule does not
+    /// apply to its current state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Progress is anything that proves the partition's pipeline still turns over: a fetch that
+    /// returned, empty or not (an idle consumer in <c>ReadMode.Block</c> completes one every
+    /// <c>BlockMs</c>, so a quiet topic is never stalled), a batch the handler finished, or the end
+    /// of a block. A batch the handler is still holding counts against it from the moment it was
+    /// handed over (<see cref="MarkBusy"/>), because the reader runs ahead of the processor and its
+    /// empty reads would otherwise hide a handler that never returns. Positions that cannot be
+    /// written count against it too: a consumer that reads and handles but whose every position
+    /// write fails is not making durable progress, and the host feeds that duration in through
+    /// <see cref="SetPersistFailing"/>.
+    /// </para>
+    /// <para>
+    /// It deliberately ignores the sampled tail, the lag and <see cref="IsCaughtUp"/>. The tail is
+    /// sampled over the same Redis connection a wedged consumer cannot use, and when that sample
+    /// goes stale the behind-the-tail rule stands down — "unknown is not Unhealthy". A stall is
+    /// measured on this process's own clock, so it still says something when Redis says nothing.
+    /// </para>
+    /// <para>
+    /// A partition blocked retrying a <c>DontIgnoreException</c> is not stalled: it is doing what
+    /// its handler asked, and <see cref="UnhealthyBlockSeconds"/> grades it. A partition blocked
+    /// because its reads fail is: that is the outage this rule exists for. A stop is not either,
+    /// unless it was this rule that stood the partition down (<see cref="IsStalledOut"/>).
+    /// </para>
+    /// </remarks>
+    internal double StalledMs
+    {
+        get
+        {
+            switch (this.State)
+            {
+                case PartitionRunState.Stopped when Volatile.Read(ref this.stalledOut) == 0:
+                    return 0;
+
+                case PartitionRunState.Blocked when Volatile.Read(ref this.transportBlocked) == 0:
+                    return 0;
+            }
+
+            var idle = this.clock.GetElapsedTime(Volatile.Read(ref this.progressAt)).TotalMilliseconds;
+
+            // A batch the handler has not finished. Separate from the idle clock because the read
+            // side runs ahead of the processor: on a quiet topic the reader keeps completing empty
+            // reads — progress, by the rule above — while the handler sits on one batch forever.
+            var since = Volatile.Read(ref this.busySince);
+            var busy = since == 0 ? 0 : this.clock.GetElapsedTime(since).TotalMilliseconds;
+            var unpersisted = (double)Volatile.Read(ref this.persistFailingMs);
+
+            return Math.Max(Math.Max(idle, busy), unpersisted);
+        }
+    }
+
+    /// <summary>
+    /// Whether this partition was stood down because it stalled. Such a partition keeps reporting
+    /// Unhealthy until this instance reads it again or restarts, because the stall is evidence that
+    /// this process cannot do its job, whoever reads the partition now.
+    /// </summary>
+    internal bool IsStalledOut => Volatile.Read(ref this.stalledOut) != 0;
 
     /// <summary>
     /// Whether this stop should turn Unhealthy once it has lasted <see cref="UnhealthyStoppedSeconds"/>
@@ -278,13 +363,37 @@ internal sealed class StreamPartitionMonitor
         Volatile.Write(ref this.lastProcessedSeq, id.Seq);
         Volatile.Write(ref this.lastProcessedMs, id.Ms);
         Volatile.Write(ref this.caughtUp, 0);
+        this.NoteProgress();
     }
+
+    /// <summary>A batch has been handed to the handler. Starts the in-flight clock <see cref="StalledMs"/> reads.</summary>
+    internal void MarkBusy() => Volatile.Write(ref this.busySince, this.clock.GetTimestamp());
+
+    /// <summary>
+    /// The batch is finished with — handled, skipped under <c>BestEffort</c>, or abandoned on a stop.
+    /// Progress, and the end of the in-flight clock.
+    /// </summary>
+    internal void MarkIdle()
+    {
+        Volatile.Write(ref this.busySince, 0);
+        this.NoteProgress();
+    }
+
+    /// <summary>
+    /// Records that a fetch returned entries. Progress for the stall clock: the read side is alive
+    /// and Redis answered. A fetch that returned nothing reports through <see cref="MarkCaughtUp"/>.
+    /// </summary>
+    internal void MarkFetched() => this.NoteProgress();
 
     /// <summary>
     /// Records that a fetch came back empty, so this partition is at the tail of its stream and its
     /// lag is zero however old the last entry is.
     /// </summary>
-    internal void MarkCaughtUp() => Volatile.Write(ref this.caughtUp, 1);
+    internal void MarkCaughtUp()
+    {
+        Volatile.Write(ref this.caughtUp, 1);
+        this.NoteProgress();
+    }
 
     /// <summary>
     /// True when the last fetch returned nothing and this partition is sitting at the tail.
@@ -383,7 +492,9 @@ internal sealed class StreamPartitionMonitor
         Volatile.Write(ref this.state, (int)PartitionRunState.Running);
         Volatile.Write(ref this.stoppedSince, 0);
         Volatile.Write(ref this.escalates, 0);
+        Volatile.Write(ref this.stalledOut, 0);
         this.ClearBlock();
+        this.NoteProgress();
     }
 
     /// <summary>
@@ -393,6 +504,7 @@ internal sealed class StreamPartitionMonitor
     /// </summary>
     internal void MarkBlocked()
     {
+        Volatile.Write(ref this.transportBlocked, 0);
         Volatile.Write(ref this.state, (int)PartitionRunState.Blocked);
 
         if (Interlocked.CompareExchange(ref this.blockedSince, this.clock.GetTimestamp(), 0) == 0)
@@ -403,12 +515,46 @@ internal sealed class StreamPartitionMonitor
         StreamsDiagnostics.SetBlockDurationMs(this.MetricKey, this.BlockedMs);
     }
 
+    /// <summary>
+    /// The read is failing on the transport — Redis unreachable, a timeout, a reply that could not
+    /// be parsed — and the read loop is retrying it. Reported as Blocked like a handler block, but
+    /// unlike one it does not suspend the stall clock: a partition that cannot read is not making
+    /// progress, and nothing its handler asked for explains it.
+    /// </summary>
+    internal void MarkTransportBlocked()
+    {
+        this.MarkBlocked();
+        Volatile.Write(ref this.transportBlocked, 1);
+    }
+
     /// <summary>The blocking batch finally succeeded.</summary>
     internal void MarkUnblocked()
     {
         this.ClearBlock();
         Volatile.Write(ref this.state, (int)PartitionRunState.Running);
+        this.NoteProgress();
     }
+
+    /// <summary>
+    /// The host stood this partition down because it stalled, and in <c>Lease</c> mode gave its
+    /// lease up. The monitor stays registered after the read side lets the partition go, so the
+    /// health check keeps reporting the stall until this instance reads the partition again (a
+    /// fresh monitor replaces this one) or restarts.
+    /// </summary>
+    /// <param name="reason">Why — surfaced verbatim in the health check description.</param>
+    internal void MarkStalledOut(string reason)
+    {
+        Volatile.Write(ref this.stalledOut, 1);
+        this.MarkStopped(reason, escalate: true);
+    }
+
+    /// <summary>
+    /// How long this partition's recorded positions have been failing to reach Redis, or zero when
+    /// the last write landed. Pushed by the host, which reads it off the position flusher.
+    /// </summary>
+    /// <param name="failing">The duration of the current run of failed position writes.</param>
+    internal void SetPersistFailing(TimeSpan failing)
+        => Volatile.Write(ref this.persistFailingMs, (long)Math.Max(0, failing.TotalMilliseconds));
 
     /// <summary>The partition has stood down and will not read again without a restart.</summary>
     /// <param name="reason">Why — surfaced verbatim in the health check description.</param>
@@ -481,6 +627,8 @@ internal sealed class StreamPartitionMonitor
 
     private double ElapsedMs(long from, long to) => this.clock.GetElapsedTime(from, to).TotalMilliseconds;
 
+    private void NoteProgress() => Volatile.Write(ref this.progressAt, this.clock.GetTimestamp());
+
     private void ClearBlock()
     {
         if (Interlocked.Exchange(ref this.blockedSince, 0) != 0)
@@ -545,6 +693,8 @@ internal static class StreamLag
     /// <param name="unhealthyBehindSeconds">Behind-the-tail threshold from <c>ConsumerOptions.UnhealthyBehindSeconds</c>; 0 is off.</param>
     /// <param name="startPosition">The position this instance starts reading after.</param>
     /// <param name="clock">Clock for every duration the monitor reports; the system clock when null.</param>
+    /// <param name="degradedSilenceSeconds">Silence threshold from <c>ConsumerOptions.DegradedSilenceSeconds</c>; 0 is off.</param>
+    /// <param name="unhealthyStalledSeconds">Stall threshold from <c>ConsumerOptions.UnhealthyStalledSeconds</c>; 0 is off.</param>
     /// <returns>The monitor for that partition.</returns>
     internal static StreamPartitionMonitor Track(
         string topic,
@@ -557,7 +707,8 @@ internal static class StreamLag
         int unhealthyBehindSeconds = 0,
         StreamId startPosition = default,
         TimeProvider? clock = null,
-        int degradedSilenceSeconds = 0)
+        int degradedSilenceSeconds = 0,
+        int unhealthyStalledSeconds = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentException.ThrowIfNullOrWhiteSpace(consumer);
@@ -573,7 +724,8 @@ internal static class StreamLag
             unhealthyBehindSeconds,
             startPosition,
             clock,
-            degradedSilenceSeconds);
+            degradedSilenceSeconds,
+            unhealthyStalledSeconds);
 
         return Monitors.AddOrUpdate(monitor.MetricKey, monitor, (_, _) => monitor);
     }
@@ -587,7 +739,15 @@ internal static class StreamLag
     {
         ArgumentNullException.ThrowIfNull(monitor);
 
-        Monitors.TryRemove(monitor.MetricKey, out _);
+        // Only this monitor, never whatever is registered under its key now. A stalled-out monitor
+        // outlives its read side (see MarkStalledOut), and the same partition can be re-acquired
+        // and re-registered while it is still held; forgetting the old one later must not take the
+        // live one, or its gauges, with it.
+        if (!Monitors.TryRemove(new KeyValuePair<string, StreamPartitionMonitor>(monitor.MetricKey, monitor)))
+        {
+            return;
+        }
+
         StreamsDiagnostics.ClearPartition(monitor.MetricKey);
         StreamsDiagnostics.ClearStreamLength(monitor.StreamMetricKey);
     }

@@ -309,6 +309,7 @@ Keys worth knowing, with their defaults:
 | `Consumers[n]:Backpressure:Capacity` | `4` | Batches in flight per partition |
 | `Consumers[n]:Delivery` | `Ordered` | `WorkQueue` gives up per-key ordering — see below |
 | `Consumers[n]:UnhealthyBehindSeconds` | `0` (off) | The only health threshold safe to restart on: behind the tail with a frozen position. Set it shorter than your slowest batch and a healthy consumer is restarted mid-batch — see [Health](#health-one-set-of-rules-two-hosts) |
+| `Consumers[n]:UnhealthyStalledSeconds` | `300` | No progress at all — no read returning, no batch completing, position writes failing — for this long: Unhealthy, and under `Lease` the lease is handed to another instance. Measured locally, so it works when Redis cannot be reached. Set it longer than your slowest batch — see [A stalled partition](#a-stalled-partition-is-handed-on) |
 
 Misconfiguration throws `StreamConfigurationException` at startup, with the offending key named in
 the message. It never waits until 3am to tell you.
@@ -782,7 +783,7 @@ worker wraps this in an `IHealthCheck`, map `StreamHealthStatus` to `HealthStatu
 
 | Verdict | When |
 |---|---|
-| **Unhealthy** | The Redis connection is down · a partition blocked past `UnhealthyBlockSeconds` · a partition whose stop `Escalates`, stopped past `UnhealthyStoppedSeconds` with entries waiting · a partition **behind the tail with a frozen position** past `UnhealthyBehindSeconds` (off by default) · no registered consumer started · every partition stopped |
+| **Unhealthy** | The Redis connection is down · a partition **stalled** past `UnhealthyStalledSeconds`, or stood down for stalling · a partition blocked past `UnhealthyBlockSeconds` · a partition whose stop `Escalates`, stopped past `UnhealthyStoppedSeconds` with entries waiting · a partition **behind the tail with a frozen position** past `UnhealthyBehindSeconds` (off by default) · no registered consumer started · every partition stopped |
 | **Degraded** | Nothing has started reading yet · a partition blocked or stopped inside its threshold, or stopped by `ErrorPolicy` · lag past `UnhealthyLagMs` · an ownership gap or overlap · a consumer caught up and receiving nothing past `DegradedSilenceSeconds` (off by default) |
 
 ### A frozen position: one clock, two meanings
@@ -848,7 +849,7 @@ trigger it fires when nothing is wrong.
   answers to `UnhealthyBlockSeconds` and a stopped one to `UnhealthyStoppedSeconds`, not to this
   window; an `ErrorPolicy.StopPartition` stop stays Degraded, because a restart would only replay the
   entry it stopped on. When several rules fire at once the report names the first of: connection,
-  blocked too long, stopped too long, behind the tail.
+  stalled, blocked too long, stopped too long, behind the tail.
 
 Choose N longer than the slowest batch the handler can legitimately take — the position moves when a
 batch completes — and not below about 30, which leaves fewer than two tail samples. Detection takes
@@ -860,6 +861,39 @@ What it cannot see: a consumer reading the *wrong* stream — a mismatched key p
 stream whose tail legitimately equals its position. Only a host that knows data should be arriving
 can call that a fault; the snapshot below carries what such a host needs, and the library takes no
 view.
+
+### A stalled partition is handed on
+
+Behind-the-tail compares the position against a tail the lag sampler reads from Redis, over this
+process's connection. When that connection is what has gone wrong — reads timing out, replies the
+client cannot parse after a desync — the sample stops arriving, the rule stands down ("unknown is not
+Unhealthy"), and the best the check can say is Degraded. Meanwhile, under `Lease`, the ownership
+registry kept renewing the partition's lease from its own timer, so no other instance could take it.
+That is how one pod held both partitions of a topic for four hours after an out-of-memory crash.
+
+`UnhealthyStalledSeconds` (default 300) closes that gap on the process's own clock:
+
+> a partition this instance owns has made **no progress** for N seconds — no read has returned,
+> empty or not; no batch has completed; or one batch has been with the handler that long; or its
+> position writes have been failing that long.
+
+- **An idle topic never stalls.** In `ReadMode.Block` an empty read returns every `BlockMs`, and an
+  empty read is progress. A slow handler that completes batches never stalls either.
+- **Declared states keep their own rules.** A partition blocked retrying a `DontIgnoreException` is
+  graded by `UnhealthyBlockSeconds`; a policy stop is a stop. A partition whose *reads* keep failing
+  is stalled — the block-and-retry on a Redis failure is what stops a Redis blip killing a partition,
+  and this is what stops it holding the lease when the fault is in this process instead.
+- **Under `Lease` the lease goes.** The host stops the partition's worker, gives the lease up at once
+  and will not claim it back for `max(2 × LeaseTtlSeconds, UnhealthyStalledSeconds)`; while it holds a
+  quarantine it also stops counting towards the fair share, so the instance taking over can take every
+  partition rather than its old share. The next read side gets a fresh reader connection. A worker that
+  faults under a non-fatal policy is stood down the same way, at once.
+- **And it stays Unhealthy** (rule `Stalled`, `StreamPartitionStatus.StoodDownStalled`) until it reads
+  the partition again or restarts — the fault is in the process, so a restart is still what fixes it.
+  Under `Static` there is no lease to hand on, and the Unhealthy report is the whole remedy.
+
+Choose N longer than the slowest batch the handler can legitimately take. Detection takes between N
+and N + 1 seconds.
 
 ### Reading the signals yourself
 
