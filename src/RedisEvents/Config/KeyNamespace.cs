@@ -1,58 +1,48 @@
 namespace RedisEvents.Config;
 
 /// <summary>
-/// The environment- and service-scoped prefix folded into every key this library, and its
-/// <c>RedisEvents.EventSourcing</c>/<c>RedisEvents.Projections</c> siblings, write to Redis.
+/// The fixed prefix folded into every key this library, and its
+/// <c>RedisEvents.EventSourcing</c>/<c>RedisEvents.Projections</c> siblings, write to Redis:
+/// <c>re:</c>, so the library's keys are recognisable and kept apart from an application's own.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Every key this library builds — <c>s:{topic}:&lt;p&gt;</c>, <c>o:{topic}:&lt;consumer&gt;</c>,
-/// <c>p:{topic}:&lt;consumer&gt;</c>, <c>m:{topic}</c>, <c>{topic}:state:&lt;name&gt;</c>,
-/// <c>{topic}:view:&lt;viewName&gt;</c>, <c>dedupe:{scope}:&lt;id&gt;</c> — is scoped only by topic
-/// name. Two environments (dev, qa, …) pointed at the same Redis collide on every one of them the
-/// moment they share a topic name, which is the common case. <see cref="Prefix"/> is prepended
-/// (outside any hash-tag brace, so partition co-location is unaffected) to fix that.
+/// <b>The library does not know about environments.</b> Topic and consumer names are opaque, and
+/// isolation comes from them alone: a stream, its topic meta and any outbox state belong to the
+/// topic name; positions, ownership leases, a work-queue group and (by default) projection views
+/// belong to the consumer name. An application that runs several environments on one Redis composes
+/// those names itself — a topic <c>np.mult_feed_events</c> shared by every environment, consumers
+/// <c>dev.my-service</c> and <c>tst.my-service</c> — and two consumers with different names on one
+/// topic never share a key. The library does not derive anything from <c>ASPNETCORE_ENVIRONMENT</c>
+/// or <c>DOTNET_ENVIRONMENT</c>.
 /// </para>
 /// <para>
-/// Resolved fresh on every call from the ambient environment, the same way
-/// <c>StreamConfigBinder</c> resolves the environment name for validation — no configuration
-/// section is needed for the common case, and a service already setting
-/// <c>ASPNETCORE_ENVIRONMENT</c>/<c>DOTNET_ENVIRONMENT</c> for every other purpose gets a correctly
-/// namespaced key store for free. <c>STREAMS_KEY_PREFIX</c> overrides it outright for the rare case
-/// that needs a literal, hand-chosen prefix (a migration, a shared sandbox).
+/// <c>STREAMS_KEY_PREFIX</c> replaces the prefix verbatim (it must end in <c>:</c> to read as a
+/// segment) for the rare case that needs a hand-chosen one, such as two unrelated applications
+/// sharing one Redis. It is the only override. The prefix sits outside any hash-tag brace, so it
+/// never affects which cluster slot a key lands in.
 /// </para>
 /// </remarks>
 public static class KeyNamespace
 {
     private const string OverrideVariable = "STREAMS_KEY_PREFIX";
-    private const string Marker = "re";
+    private const string DefaultPrefix = "re:";
 
     /// <summary>
-    /// The prefix to fold into every key, e.g. <c>"dev:re:"</c>.
+    /// The prefix to fold into every key: <c>"re:"</c>, or <c>STREAMS_KEY_PREFIX</c> verbatim when set.
     /// </summary>
-    /// <param name="environmentName">
-    /// Overrides the ambient environment name; primarily for tests. <see langword="null"/> reads
-    /// <c>ASPNETCORE_ENVIRONMENT</c> / <c>DOTNET_ENVIRONMENT</c>, defaulting to <c>"production"</c>.
-    /// </param>
-    /// <returns>The literal prefix, always ending in <c>:</c>.</returns>
-    public static string Prefix(string? environmentName = null)
+    /// <returns>The literal prefix.</returns>
+    public static string Prefix()
     {
         var overridden = Environment.GetEnvironmentVariable(OverrideVariable);
-        if (!string.IsNullOrWhiteSpace(overridden))
-            return overridden;
-
-        var environment = environmentName
-            ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
-            ?? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
-            ?? "production";
-
-        return $"{environment.ToLowerInvariant()}:{Marker}:";
+        return string.IsNullOrWhiteSpace(overridden) ? DefaultPrefix : overridden;
     }
 
     /// <summary>
-    /// The service name folded into <c>RedisEvents.Projections</c> view keys, so two services that
-    /// happen to choose the same view name on the same topic do not overwrite each other. The entry
-    /// assembly name — the same default <c>StreamConfigBinder</c> uses for the consumer group name.
+    /// The last-resort service name: the entry assembly name. It is the consumer name when neither a
+    /// consumer entry nor <c>Streams:Consumer</c> sets one, and the projection view owner when no owner
+    /// and no <c>Streams:Consumer</c> is given. Two deployments of one assembly that must not share
+    /// keys therefore have to set <c>Streams:Consumer</c>.
     /// </summary>
     /// <returns>The entry assembly's simple name, or <c>"unknown"</c> if it cannot be resolved.</returns>
     public static string DefaultServiceName()

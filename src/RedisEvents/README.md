@@ -314,6 +314,37 @@ Keys worth knowing, with their defaults:
 Misconfiguration throws `StreamConfigurationException` at startup, with the offending key named in
 the message. It never waits until 3am to tell you.
 
+### Keys, and what isolates what
+
+Topic and consumer names are opaque, and they are the only isolation. The library derives nothing from
+`ASPNETCORE_ENVIRONMENT`/`DOTNET_ENVIRONMENT`; every key carries the fixed prefix `re:` (or
+`STREAMS_KEY_PREFIX`, verbatim, when set).
+
+| Key | Shape | Belongs to |
+|---|---|---|
+| partition stream | `re:s:{<topic>}:<p>` | the topic |
+| topic meta | `re:m:{<topic>}` | the topic |
+| positions (+ reset markers) | `re:p:{<topic>}:<consumer>` (`:meta`) | the consumer |
+| ownership / leases | `re:o:{<topic>}:<consumer>` | the consumer |
+| `WorkQueue` group | group `<consumer>` on the stream key | the consumer |
+| outbox / event-store state | `re:{<topic>}:state:<name>` | the topic (its writer) |
+| dedupe marker | `re:dedupe:{<scope>}:<id>` | the scope the caller passes |
+| projection view | `re:{<topic>}:view:<owner>:<view>` | the owner (default `Streams:Consumer`) |
+
+Several environments on one Redis are the application's to compose: a feed shared by all of them is one
+topic (`np.mult_feed_events`), and each environment's service is its own consumer (`dev.my-service`,
+`tst.my-service`). Two consumer names on one topic each get every message, keep their own positions and
+group, and an admin reset of one leaves the other alone. Things to get right:
+
+- **Set `Streams:Consumer`** (or `Consumers[n]:Consumer`) per deployment. The fallback is the entry
+  assembly's name, which two deployments of one service share.
+- **Dedupe in a handler with a consumer-scoped scope** (`Idempotency.TryBeginAsync(db, consumerName, id, ...)`).
+  A topic-name scope is shared by every consumer of that topic.
+- **Views** default their owner to `Streams:Consumer`; pass an explicit owner when a different process
+  reads them.
+- Background trimming of a topic clamps to every consumer's positions on it, whichever deployment it
+  belongs to; turn `BackgroundTrimIntervalSeconds` on only in the deployment that owns the topic.
+
 ---
 
 ## Publishing

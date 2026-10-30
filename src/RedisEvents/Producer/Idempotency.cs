@@ -13,7 +13,7 @@ public static class Idempotency
 {
     /// <summary>
     /// Builds the deduplication key for a scope and id: <c>&lt;prefix&gt;dedupe:{scope}:&lt;id&gt;</c>,
-    /// where <c>&lt;prefix&gt;</c> is <see cref="KeyNamespace.Prefix"/>, e.g. <c>dev:re:</c>.
+    /// where <c>&lt;prefix&gt;</c> is <see cref="KeyNamespace.Prefix"/>, <c>re:</c>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -94,7 +94,12 @@ public static class Idempotency
     /// </para>
     /// </remarks>
     /// <param name="db">The Redis database.</param>
-    /// <param name="scope">A scope name (e.g., topic name or handler name) to avoid collisions between different message types.</param>
+    /// <param name="scope">
+    /// A scope name, to avoid collisions between different message types. Markers are isolated by
+    /// scope alone, so in a handler use the consumer name (or one derived from it): two consumers of
+    /// one topic that share a scope share their markers, and the second to see a message skips it as a
+    /// duplicate. A topic name is a safe scope only on the producing side, where the topic has one owner.
+    /// </param>
     /// <param name="id">The message id or idempotency key to deduplicate.</param>
     /// <param name="ttl">
     /// The time-to-live for the deduplication marker; typically above the replay window. Must be at

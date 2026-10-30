@@ -4,6 +4,21 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-30
+
+### Changed (breaking: every key moves)
+
+- **Keys no longer carry an environment.** `KeyNamespace.Prefix()` is the fixed `re:` (or
+  `STREAMS_KEY_PREFIX` verbatim); `ASPNETCORE_ENVIRONMENT`/`DOTNET_ENVIRONMENT` are no longer read, and
+  the `environmentName` parameter is gone. `dev:re:s:{orders}:0` is now `re:s:{orders}:0`, and so on for
+  every key. Topic and consumer names are opaque and are the only isolation: an application running
+  several environments on one Redis composes them (topic `np.mult_feed_events`, consumers
+  `dev.my-service`/`tst.my-service`). Nothing migrates old keys: existing streams, positions, groups,
+  state and views under `<env>:re:` are orphaned.
+- **`AddRedisViewStore` without an owner keys the view by `Streams:Consumer`**, falling back to the entry
+  assembly's name as before. The environment prefix used to keep two deployments' views apart; the
+  consumer name does now. The `RedisViewStore` constructor without an owner still uses the assembly name.
+
 ## 2026-10-27
 
 ### Fixed

@@ -2,7 +2,11 @@ using System.Text.Json.Serialization;
 
 using FluentAssertions;
 
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
 using RedisEvents.Config;
+using RedisEvents.Extensions;
 using RedisEvents.Projections;
 
 namespace RedisEvents.Tests;
@@ -102,7 +106,7 @@ public sealed class RedisViewStoreTests(RedisStreamsFixture fixture)
         detailList.Should().ContainSingle().Which.Should().Be(new Detail("a1", "Detail view", 1));
     }
 
-    /// <summary>The default key shape is unchanged: the entry assembly's name is the owner segment.</summary>
+    /// <summary>A store constructed without an owner uses the entry assembly's name as the owner segment.</summary>
     [Fact]
     [Trait("TestType", "ServiceTest")]
     public async Task Default_key_uses_the_entry_assembly_name_as_owner()
@@ -114,6 +118,36 @@ public sealed class RedisViewStoreTests(RedisStreamsFixture fixture)
 
         var expected = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{KeyNamespace.DefaultServiceName()}:detail";
         (await fixture.Db.HashExistsAsync(expected, "a1")).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// <c>AddRedisViewStore</c> without an owner keys the view by the service's consumer name, so two
+    /// deployments of one service that compose different consumer names (<c>dev.views</c>,
+    /// <c>tst.views</c>) project one shared topic into separate hashes.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "ServiceTest")]
+    public async Task Registered_store_without_an_owner_is_keyed_by_the_consumer_name()
+    {
+        var topic = fixture.NewTopic();
+
+        foreach (var consumer in new[] { "dev.views", "tst.views" })
+        {
+            var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings { EnvironmentName = "Production" });
+            builder.Configuration["Streams:ConnectionString"] = fixture.ConnectionString;
+            builder.Configuration["Streams:Consumer"] = consumer;
+            builder.AddStreamPublisher(topic)
+                   .AddRedisViewStore<Detail>(topic, "detail", RedisViewStoreTestsJson.Default.Detail);
+
+            using var host = builder.Build();
+            await host.Services.GetRequiredService<IViewStore<Detail>>().SetAsync("a1", new Detail("a1", consumer, 1));
+        }
+
+        foreach (var consumer in new[] { "dev.views", "tst.views" })
+        {
+            var stored = await fixture.Db.HashGetAsync($"{KeyNamespace.Prefix()}{{{topic}}}:view:{consumer}:detail", "a1");
+            ((string?)stored).Should().Contain(consumer, "each deployment's view is its own");
+        }
     }
 
     /// <summary>An explicit owner replaces the assembly name in the key.</summary>

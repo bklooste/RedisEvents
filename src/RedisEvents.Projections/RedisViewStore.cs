@@ -14,24 +14,23 @@ namespace RedisEvents.Projections;
 /// <remarks>
 /// <para>
 /// <b>Storage shape.</b> All views of one type live in a single hash keyed
-/// <c>&lt;env&gt;:re:{topic}:view:&lt;owner&gt;:&lt;viewName&gt;</c> — the same <c>{topic}</c>
+/// <c>re:{topic}:view:&lt;owner&gt;:&lt;viewName&gt;</c> — the same <c>{topic}</c>
 /// hash-tag brace convention core uses for state keys (see <c>Outbox.StateKey</c>), though a view
-/// does not need to share the topic's hash slot; the prefix is namespacing only. The environment
-/// segment (<see cref="KeyNamespace.Prefix"/>) keeps two environments sharing one Redis apart, and
-/// the owner segment keeps two services that pick the same view name under the same topic apart too.
+/// does not need to share the topic's hash slot; the prefix is namespacing only
+/// (<see cref="KeyNamespace.Prefix"/>). The owner segment is what keeps two services — or two
+/// deployments of one service — that project the same topic into the same view name apart.
 /// <see cref="GetAsync"/>/<see cref="SetAsync"/>/<see cref="DeleteAsync"/> are <c>HGET</c>/<c>HSET</c>/
 /// <c>HDEL</c> on the view's field; <see cref="ListAsync"/> is <c>HSCAN</c> over the whole hash — one
 /// key to reason about, and listing comes for free.
 /// </para>
 /// <para>
-/// <b>The owner segment.</b> By default it is <see cref="KeyNamespace.DefaultServiceName"/> — the
-/// entry assembly's name — so existing keys do not move. That default is only right when the process
-/// that writes the view is the process that reads it. When a view is written by one process (say a
-/// headless projection worker) and read by another (a query service), or read from a test host, the
-/// entry assemblies differ and so would the keys; the reader would see an empty view. Pass the same
-/// explicit <c>owner</c> to the store on both sides, using a stable logical name for the view's
-/// owning service rather than either process's assembly name. Two stores with different owners are
-/// two different hashes, even for the same topic and view name.
+/// <b>The owner segment.</b> The library knows nothing about environments: two deployments reading
+/// one shared topic are told apart only by the owner. Pass an explicit owner that the application
+/// composes (e.g. <c>dev.wallet-views</c>), the same on the writing and the reading side. The
+/// constructor without an owner uses <see cref="KeyNamespace.DefaultServiceName"/>, the entry
+/// assembly's name, which is only right for a single deployment whose writer and reader are the same
+/// assembly; <c>AddRedisViewStore</c> without an owner uses <c>Streams:Consumer</c> first. Two stores
+/// with different owners are two different hashes, even for the same topic and view name.
 /// </para>
 /// <para>
 /// <b>Serialisation.</b> Values are UTF-8 JSON bytes produced and consumed entirely through the
@@ -68,8 +67,9 @@ public sealed class RedisViewStore<TView> : IViewStore<TView>
     /// <param name="typeInfo">The source-generated <see cref="JsonTypeInfo{T}"/> for <typeparamref name="TView"/>.</param>
     /// <remarks>
     /// The owner segment of the key is the entry assembly's name (<see cref="KeyNamespace.DefaultServiceName"/>).
-    /// If another process (or a test host) must read what this one writes, use the overload taking an
-    /// explicit <c>owner</c> on both sides.
+    /// Two deployments of one assembly on one Redis would share the view; pass an explicit
+    /// <c>owner</c> unless there is only one. If another process (or a test host) must read what this
+    /// one writes, use the overload taking an explicit <c>owner</c> on both sides.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="db"/> or <paramref name="typeInfo"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="topic"/> or <paramref name="viewName"/> is null, empty or whitespace.</exception>
