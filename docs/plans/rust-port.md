@@ -24,11 +24,10 @@ idioms wherever the bytes in Redis stay identical.
 Taken from the code. Phase 0 turns this list into `WIRE.md` plus golden vectors.
 
 ### 2.1 Key namespace (`Config/KeyNamespace.cs`)
-- Prefix = `STREAMS_KEY_PREFIX` if set. Otherwise `"{env}:re:"`, where `env` is the lowercased
-  `ASPNETCORE_ENVIRONMENT`, then `DOTNET_ENVIRONMENT`, defaulting to `production`.
-- **Rust must read the same variables in the same order.** A Rust service that defaults to a
-  different prefix silently sees an empty topic. Rust may also accept `STREAMS_ENVIRONMENT` as an
-  alias, but it must rank below the two .NET variables.
+- Prefix = `STREAMS_KEY_PREFIX` verbatim if set, otherwise the fixed `"re:"`. No environment
+  variable (`ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`) is consulted: the library knows nothing
+  about environments. Isolation comes from the topic and consumer names, which applications compose
+  (e.g. topic `np.mult_feed_events`, consumer `dev.my-service`); Rust must treat them as opaque too.
 
 ### 2.2 Keys (`Wire/StreamKeys.cs`, `Outbox.StateKey`, `Idempotency`, `RedisViewStore`)
 | Key | Shape |

@@ -203,7 +203,8 @@ public sealed class GoldenVectorTests
 
     private static readonly string[] Topics = { "orders", "a.b-c" };
     private const string Consumer = "svc";
-    private const string TestPrefix = "test:re:";
+    private const string ComposedConsumer = "dev.svc";
+    private const string DefaultPrefix = "re:";
 
     private static readonly string[] PrefixVariables =
     {
@@ -217,8 +218,10 @@ public sealed class GoldenVectorTests
         var saved = PrefixVariables.ToDictionary(v => v, Environment.GetEnvironmentVariable);
         try
         {
-            Environment.SetEnvironmentVariable("STREAMS_KEY_PREFIX", TestPrefix);
-            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", null);
+            // An environment is set on purpose: the library must ignore it. Keys carry only the fixed
+            // prefix and the (application-composed) topic and consumer names.
+            Environment.SetEnvironmentVariable("STREAMS_KEY_PREFIX", null);
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Development");
             Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", null);
 
             var keys = new List<KeyCase>();
@@ -229,6 +232,8 @@ public sealed class GoldenVectorTests
                 keys.Add(new KeyCase($"{topic}:positions", StreamKeys.Positions(topic, Consumer)));
                 keys.Add(new KeyCase($"{topic}:positions-meta", StreamKeys.PositionsMeta(topic, Consumer)));
                 keys.Add(new KeyCase($"{topic}:ownership", StreamKeys.Ownership(topic, Consumer)));
+                keys.Add(new KeyCase($"{topic}:positions:{ComposedConsumer}", StreamKeys.Positions(topic, ComposedConsumer)));
+                keys.Add(new KeyCase($"{topic}:ownership:{ComposedConsumer}", StreamKeys.Ownership(topic, ComposedConsumer)));
                 keys.Add(new KeyCase($"{topic}:topic-meta", StreamKeys.TopicMeta(topic)));
                 keys.Add(new KeyCase($"{topic}:state", Outbox.StateKey(topic, "es:Order:42")));
                 keys.Add(new KeyCase($"{topic}:dedupe", Idempotency.Key(topic, "evt-1")));
@@ -236,15 +241,14 @@ public sealed class GoldenVectorTests
 
             var prefixCases = new List<PrefixCase>
             {
-                PrefixFor("aspnetcore-development", aspnet: "Development", dotnet: null, streams: null),
-                PrefixFor("dotnet-qa-only", aspnet: null, dotnet: "QA", streams: null),
-                PrefixFor("both-set-aspnetcore-wins", aspnet: "Staging", dotnet: "QA", streams: null),
-                PrefixFor("none-is-production", aspnet: null, dotnet: null, streams: null),
+                PrefixFor("default", aspnet: null, dotnet: null, streams: null),
+                PrefixFor("aspnetcore-environment-ignored", aspnet: "Development", dotnet: null, streams: null),
+                PrefixFor("dotnet-environment-ignored", aspnet: null, dotnet: "QA", streams: null),
                 PrefixFor("override-verbatim", aspnet: "Development", dotnet: null, streams: "custom:"),
                 PrefixFor("blank-override-ignored", aspnet: "Development", dotnet: null, streams: "   "),
             };
 
-            GoldenVectorFiles.Check("keys.json", new KeysFile(TestPrefix, keys, prefixCases));
+            GoldenVectorFiles.Check("keys.json", new KeysFile(DefaultPrefix, keys, prefixCases));
         }
         finally
         {

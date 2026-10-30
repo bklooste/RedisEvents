@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+using RedisEvents.Config;
 using RedisEvents.Errors;
 using RedisEvents.Extensions;
 
@@ -328,8 +329,11 @@ public static class ProjectionsBuilderExtensions
     /// <param name="json">Source-generated metadata for <typeparamref name="TView"/>.</param>
     /// <returns>The builder, for chaining.</returns>
     /// <remarks>
-    /// The view's key carries the entry assembly's name as its owner. If another process must read
-    /// this view, use the overload taking an explicit <c>owner</c> on both sides.
+    /// The view's key carries this service's consumer name as its owner: <c>Streams:Consumer</c>, or
+    /// the entry assembly's name when that is not set — the same name the service's consumers default
+    /// to. So two deployments that compose different consumer names (<c>dev.my-service</c>,
+    /// <c>tst.my-service</c>) get different views, even projecting one shared topic. If another process
+    /// must read this view, use the overload taking an explicit <c>owner</c> on both sides.
     /// </remarks>
     public static IHostApplicationBuilder AddRedisViewStore<TView>(
         this IHostApplicationBuilder builder,
@@ -347,7 +351,8 @@ public static class ProjectionsBuilderExtensions
             StreamsConnection.GetSharedDatabase(sp),
             topic,
             viewName,
-            json));
+            json,
+            DefaultOwner(sp)));
 
         return builder;
     }
@@ -393,6 +398,16 @@ public static class ProjectionsBuilderExtensions
             owner));
 
         return builder;
+    }
+
+    /// <summary>
+    /// The view owner when none is given: the service-wide consumer name (<c>Streams:Consumer</c>),
+    /// else the entry assembly's name — never anything environment-derived.
+    /// </summary>
+    private static string DefaultOwner(IServiceProvider services)
+    {
+        var consumer = services.GetService<StreamOptions>()?.Consumer;
+        return string.IsNullOrWhiteSpace(consumer) ? KeyNamespace.DefaultServiceName() : consumer;
     }
 
     private static ProjectionTypes ProjectionTypesRegistry(IHostApplicationBuilder builder)

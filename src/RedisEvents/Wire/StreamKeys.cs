@@ -11,7 +11,7 @@ namespace RedisEvents.Wire;
 /// The braces in the key shapes are literal: they are Redis Cluster hash tags around the topic
 /// name, so every key belonging to one topic hashes to the same slot and a worker's multi-stream
 /// <c>XREAD</c> plus its position write stay single-node operations. Every shape below carries
-/// <see cref="KeyNamespace.Prefix"/> ahead of the hash tag, e.g. <c>dev:re:s:{topic}:0</c> — outside
+/// <see cref="KeyNamespace.Prefix"/> ahead of the hash tag, e.g. <c>re:s:{topic}:0</c> — outside
 /// the braces, so it does not affect which slot the topic's keys land on.
 /// <list type="bullet">
 ///   <item><description>partition stream: <c>&lt;prefix&gt;s:{topic}:&lt;p&gt;</c></description></item>

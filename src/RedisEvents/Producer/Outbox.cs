@@ -297,7 +297,7 @@ public static class Outbox
 
     /// <summary>
     /// Builds a state key that shares a topic's hash slot: <c>&lt;prefix&gt;{topic}:state:&lt;name&gt;</c>,
-    /// e.g. <c>dev:re:{customer_wallet}:state:es:Wallet:123</c>. <see cref="Config.KeyNamespace.Prefix"/>
+    /// e.g. <c>re:{customer_wallet}:state:es:Wallet:123</c>. <see cref="Config.KeyNamespace.Prefix"/>
     /// sits ahead of the hash tag, so it does not affect which slot the key lands on.
     /// </summary>
     /// <param name="topic">The topic whose slot the key must share.</param>
