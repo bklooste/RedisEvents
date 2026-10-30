@@ -216,6 +216,29 @@ public class ConfigTests
         message.Should().Contain("not configured");
     }
 
+    [Theory]
+    [InlineData("np:re")]
+    [InlineData("{np}")]
+    [InlineData("n p")]
+    [Trait("TestType", "UnitTest")]
+    public void Validate_TopicStreamNamespaceOutsideTheKeySafeAlphabet_ThrowsNamingKey(string streamNamespace)
+        => Throws(WithTopic("orders", new TopicOptions { StreamNamespace = streamNamespace }))
+            .Message.Should().Contain("Streams:Topics:orders:StreamNamespace");
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("np")]
+    [InlineData("np-lite_2")]
+    [Trait("TestType", "UnitTest")]
+    public void Validate_TopicStreamNamespace_UnsetOrKeySafe_IsAccepted(string? streamNamespace)
+    {
+        var act = () => StreamConfigBinder.Validate(
+            WithTopic("orders", new TopicOptions { StreamNamespace = streamNamespace }), Production, 5000, logger: null);
+
+        act.Should().NotThrow();
+    }
+
     [Fact]
     [Trait("TestType", "UnitTest")]
     public void Validate_TrimNoneOutsideDevelopment_ThrowsNamingKeyAndEnvironment()

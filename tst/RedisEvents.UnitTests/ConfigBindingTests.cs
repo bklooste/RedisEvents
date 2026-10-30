@@ -47,7 +47,8 @@ public class ConfigBindingTests
             "BackgroundTrimIntervalSeconds": 60,
             "CoLocatePartitions": false,
             "ClampReleaseThreshold": 0.5,
-            "StateMetadata": true
+            "StateMetadata": true,
+            "StreamNamespace": "np"
           }
         },
         "Consumers": [
@@ -127,6 +128,7 @@ public class ConfigBindingTests
         topic.CoLocatePartitions.Should().BeFalse();
         topic.ClampReleaseThreshold.Should().Be(0.5);
         topic.StateMetadata.Should().BeTrue();
+        topic.StreamNamespace.Should().Be("np");
     }
 
     [Fact]

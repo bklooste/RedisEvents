@@ -247,6 +247,14 @@ internal static class StreamConfigBinder
             if (topic.Partitions < 1)
                 throw new StreamConfigurationException($"{key}:Partitions is {topic.Partitions}; it must be >= 1.");
 
+            if (!KeyNamespace.IsValidStreamNamespace(topic.StreamNamespace))
+            {
+                throw new StreamConfigurationException(
+                    $"{key}:StreamNamespace is '{topic.StreamNamespace}'; it may contain only letters, digits, '-' and '_'. " +
+                    "It becomes the '<namespace>:re:' prefix of the topic's stream keys, so ':' would forge a key segment and a " +
+                    "brace would break the hash tag.");
+            }
+
             if (topic.RetentionSeconds is int retention)
             {
                 if (retention < 1)
@@ -355,6 +363,17 @@ internal static class StreamConfigBinder
             }
 
             seen[pair] = i;
+
+            if (KeyNamespace.IsForeign(topic))
+            {
+                logger?.LogInformation(
+                    "Streams: {Key} reads topic {Topic} from the shared stream namespace {StreamPrefix}; its positions, leases " +
+                    "and any work-queue group stay in this process's namespace {ProcessPrefix}.",
+                    key,
+                    consumer.Topic,
+                    KeyNamespace.StreamPrefix(topic.StreamNamespace),
+                    KeyNamespace.Prefix());
+            }
 
             if (consumer.ReadMode != ReadMode.Block)
                 continue;

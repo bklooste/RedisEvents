@@ -33,7 +33,9 @@ public static partial class StreamAdmin
     /// <param name="consumer">Consumer name.</param>
     /// <param name="partitions">Total partitions, when the caller knows it. When zero or negative the
     /// count is read from <c>m:{topic}</c>, and failing that inferred from the highest claim — which
-    /// can only under-report a gap, never invent one.</param>
+    /// can only under-report a gap, never invent one. The <c>m:{topic}</c> read is in this process's
+    /// namespace; for a topic with a <see cref="TopicOptions.StreamNamespace"/>, pass the count (e.g.
+    /// from <see cref="ReadTopicLayoutAsync(IConnectionMultiplexer, string, string?, CancellationToken)"/>).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The ownership map as recorded in Redis.</returns>
     public static async Task<OwnershipMap> GetOwnershipAsync(
@@ -57,7 +59,7 @@ public static partial class StreamAdmin
         if (total < 1)
         {
             ct.ThrowIfCancellationRequested();
-            total = await ReadPartitionCountAsync(db, topic).ConfigureAwait(false);
+            total = await ReadPartitionCountAsync(db, topic, streamNamespace: null).ConfigureAwait(false);
         }
 
         if (total < 1)
@@ -87,9 +89,9 @@ public static partial class StreamAdmin
             DateTimeOffset.UtcNow);
     }
 
-    private static async Task<int> ReadPartitionCountAsync(IDatabase db, string topic)
+    private static async Task<int> ReadPartitionCountAsync(IDatabase db, string topic, string? streamNamespace)
     {
-        var recorded = await db.HashGetAsync(StreamKeys.TopicMeta(topic), PartitionsField).ConfigureAwait(false);
+        var recorded = await db.HashGetAsync(StreamKeys.TopicMeta(topic, streamNamespace), PartitionsField).ConfigureAwait(false);
         var text = (string?)recorded;
 
         return text is not null

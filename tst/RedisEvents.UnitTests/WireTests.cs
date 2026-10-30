@@ -1,6 +1,7 @@
 using System.Text;
 using FluentAssertions;
 using RedisEvents.Config;
+using RedisEvents.Consumer;
 using RedisEvents.Errors;
 using RedisEvents.Wire;
 using StackExchange.Redis;
@@ -719,6 +720,72 @@ public class WireTests
         Tag(positions).Should().Be("bet_state");
         Tag(ownership).Should().Be("bet_state");
         Tag(meta).Should().Be("bet_state");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void StreamKeys_StreamNamespace_MovesOnlyStreamAndTopicMeta()
+    {
+        var ns = KeyNamespace.Prefix();
+        var shared = new TopicOptions { StreamNamespace = "NP" };
+
+        // The stream and its meta follow the topic's namespace (lowercased, like an environment name)...
+        ((string?)StreamKeys.Stream("mult_feed_events", 2, shared)).Should().Be("np:re:s:{mult_feed_events}:2");
+        ((string?)StreamKeys.Stream("mult_feed_events", 2, shared with { CoLocatePartitions = false }))
+            .Should().Be("np:re:s:mult_feed_events:2");
+        ((string?)StreamKeys.TopicMeta("mult_feed_events", shared.StreamNamespace)).Should().Be("np:re:m:{mult_feed_events}");
+        StreamKeys.StreamPattern("mult_feed_events", streamNamespace: "np").Should().Be("np:re:s:{mult_feed_events}:*");
+
+        // ...while everything the consumer owns stays in the process namespace.
+        ((string?)StreamKeys.Positions("mult_feed_events", "svc")).Should().Be($"{ns}p:{{mult_feed_events}}:svc");
+        ((string?)StreamKeys.PositionsMeta("mult_feed_events", "svc")).Should().Be($"{ns}p:{{mult_feed_events}}:svc:meta");
+        ((string?)StreamKeys.Ownership("mult_feed_events", "svc")).Should().Be($"{ns}o:{{mult_feed_events}}:svc");
+
+        // Unset (or empty, as an empty environment variable binds) is the process namespace.
+        ((string?)StreamKeys.Stream("mult_feed_events", 0, new TopicOptions())).Should().Be($"{ns}s:{{mult_feed_events}}:0");
+        ((string?)StreamKeys.Stream("mult_feed_events", 0, new TopicOptions { StreamNamespace = string.Empty }))
+            .Should().Be($"{ns}s:{{mult_feed_events}}:0");
+    }
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void KeyNamespace_IsForeign_OnlyWhenTheStreamPrefixDiffersFromTheProcessPrefix()
+    {
+        var own = KeyNamespace.Prefix();
+        var ownName = own[..own.IndexOf(':')];
+
+        KeyNamespace.IsForeign(new TopicOptions()).Should().BeFalse();
+        KeyNamespace.IsForeign(new TopicOptions { StreamNamespace = string.Empty }).Should().BeFalse();
+        KeyNamespace.IsForeign(new TopicOptions { StreamNamespace = ownName.ToUpperInvariant() })
+            .Should().BeFalse("naming this process's own environment changes nothing");
+        KeyNamespace.IsForeign(new TopicOptions { StreamNamespace = ownName + "x" }).Should().BeTrue();
+    }
+
+    [Theory]
+    [Trait("TestType", "UnitTest")]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("np", true)]
+    [InlineData("np-lite_2", true)]
+    [InlineData("np:re", false)]
+    [InlineData("{np}", false)]
+    [InlineData("n p", false)]
+    [InlineData(" ", false)]
+    public void KeyNamespace_IsValidStreamNamespace(string? value, bool valid)
+        => KeyNamespace.IsValidStreamNamespace(value).Should().Be(valid);
+
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void WorkQueue_GroupName_CarriesTheProcessNamespaceOnlyOnAForeignStream()
+    {
+        var own = KeyNamespace.Prefix();
+        var ownName = own[..own.IndexOf(':')];
+
+        WorkQueueFetch.GroupName("svc", new TopicOptions())
+            .Should().Be("svc", "an existing group on an unshared stream keeps its name, and so its cursor");
+        WorkQueueFetch.GroupName("svc", new TopicOptions { StreamNamespace = ownName }).Should().Be("svc");
+        WorkQueueFetch.GroupName("svc", new TopicOptions { StreamNamespace = ownName + "x" })
+            .Should().Be($"{own}svc", "a group lives on the shared stream key, so each environment needs its own");
     }
 
     [Fact]

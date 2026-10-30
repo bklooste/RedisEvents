@@ -300,6 +300,7 @@ Keys worth knowing, with their defaults:
 | `Topics:<t>:MaxLen` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
 | `Topics:<t>:Trim` | `Approx` | `None` is refused outside `Development` — it is an OOM footgun |
 | `Topics:<t>:StateMetadata` | `false` | State-store entries hold only body and type; `true` also keeps correlation id, trace and headers, forever |
+| `Topics:<t>:StreamNamespace` | unset (process namespace) | Reads and writes the topic's stream (`s:`) and meta (`m:`) under `<ns>:re:` instead of `<env>:re:`, so several environments can consume one shared feed. Positions, leases and work-queue groups stay per environment. Changing it on a running consumer carries its old positions over — reset it — see [Shared streams](#shared-streams-across-environments) |
 | `Consumers[n]:BatchSize` | `100` | Bigger batches amortise round trips and widen the redelivery window |
 | `Consumers[n]:Persist` | `AsyncBatch` | `SyncBatch`/`SyncMessage` cost a Redis round trip; `None` never stores a position |
 | `Consumers[n]:PersistIntervalMs` | `1000` | This is your duplicate window on a crash |
@@ -313,6 +314,37 @@ Keys worth knowing, with their defaults:
 
 Misconfiguration throws `StreamConfigurationException` at startup, with the offending key named in
 the message. It never waits until 3am to tell you.
+
+### Shared streams across environments
+
+Every key carries the process namespace, `<env>:re:`, from `ASPNETCORE_ENVIRONMENT` /
+`DOTNET_ENVIRONMENT` (or `STREAMS_KEY_PREFIX` verbatim), so `dev` and `tst` on one Redis never see each
+other's keys. To have both consume one feed that a shared tier (`np`) publishes once, point the topic
+at the tier's namespace:
+
+```jsonc
+{ "Streams": { "Topics": { "mult_feed_events": { "Partitions": 2, "StreamNamespace": "np" } } } }
+```
+
+| Key | Namespace | Example (process `dev`) |
+|---|---|---|
+| partition streams | the topic's | `np:re:s:{mult_feed_events}:0` |
+| topic meta | the topic's | `np:re:m:{mult_feed_events}` |
+| positions, reset markers | the process's | `dev:re:p:{mult_feed_events}:<consumer>` |
+| ownership / leases | the process's | `dev:re:o:{mult_feed_events}:<consumer>` |
+| `WorkQueue` consumer group (on the shared stream) | the process's, in the group name | `dev:re:<consumer>` |
+| outbox state, dedupe markers, projection views | the process's | `dev:re:{mult_feed_events}:view:...` |
+
+- Each environment keeps its own cursor; a `WorkQueue` group carries the environment in its name only
+  when the stream is in another namespace, so existing groups keep their names.
+- Only the namespace that owns a stream trims it. A process ignores `BackgroundTrimIntervalSeconds` for a
+  topic in another namespace (it could only see its own namespace's positions to clamp to); the inline
+  `MAXLEN` still bounds the stream, and other environments' positions never hold it back.
+- The admin endpoints read the stream and `m:` hash in the configured namespace;
+  `StreamAdmin.ReadTopicLayoutAsync(redis, topic, streamNamespace)` does the same for code.
+- The value is lowercased and limited to letters, digits, `-` and `_`. Naming the process's own
+  environment changes nothing.
+- The stream must be on the same Redis as the process's own keys: there is no per-topic connection.
 
 ---
 

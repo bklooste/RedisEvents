@@ -305,7 +305,7 @@ public static class StreamAdminEndpoints
             // The layout is read back from Redis rather than guessed. Guessing co-location against a
             // spread topic reads keys that do not exist: the preview then reports Length 0 and the
             // reset to the end writes 0-0, both of which look like success.
-            var layout = await StreamAdmin.ReadTopicLayoutAsync(redis, topic, ct).ConfigureAwait(false);
+            var layout = await StreamAdmin.ReadTopicLayoutAsync(redis, topic, ConfiguredStreamNamespace(ctx, topic), ct).ConfigureAwait(false);
             if (layout.Partitions < 1)
             {
                 await WriteAsync(
@@ -379,6 +379,18 @@ public static class StreamAdminEndpoints
         }
     }
 
+    /// <summary>
+    /// The <see cref="TopicOptions.StreamNamespace"/> this service configures for <paramref name="topic"/>,
+    /// so the admin routes read the topic's stream and <c>m:</c> hash where its consumers do; positions
+    /// and ownership stay in this process's namespace either way. <see langword="null"/> when the
+    /// topic is not configured or no <see cref="StreamOptions"/> is registered.
+    /// </summary>
+    private static string? ConfiguredStreamNamespace(HttpContext ctx, string topic)
+        => ctx.RequestServices?.GetService(typeof(StreamOptions)) is StreamOptions options
+            && options.Topics.TryGetValue(topic, out var configured)
+                ? configured?.StreamNamespace
+                : null;
+
     internal static async Task GetOwnershipHandler(
         Func<HttpContext, IConnectionMultiplexer?> resolve,
         string topic,
@@ -405,7 +417,9 @@ public static class StreamAdminEndpoints
             }
 
             var db = redis.GetDatabase();
-            var partitionCountValue = await db.HashGetAsync(StreamKeys.TopicMeta(topic), StreamAdmin.MetaPartitionsField).ConfigureAwait(false);
+            var partitionCountValue = await db
+                .HashGetAsync(StreamKeys.TopicMeta(topic, ConfiguredStreamNamespace(ctx, topic)), StreamAdmin.MetaPartitionsField)
+                .ConfigureAwait(false);
 
             var partitions = 0;
             if (partitionCountValue.TryParse(out int count) && count > 0)

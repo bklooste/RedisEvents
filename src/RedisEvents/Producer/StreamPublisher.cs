@@ -145,7 +145,7 @@ internal sealed class StreamPublisher : IStreamPublisher
         this.partitionTags = new object[options.Partitions];
         for (var p = 0; p < options.Partitions; p++)
         {
-            this.streamKeys[p] = StreamKeys.Stream(topic, p, options.CoLocatePartitions);
+            this.streamKeys[p] = StreamKeys.Stream(topic, p, options);
             this.partitionTags[p] = p;
         }
 

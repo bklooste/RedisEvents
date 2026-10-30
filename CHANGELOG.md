@@ -4,6 +4,21 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-10-30
+
+### Added
+
+- **Per-topic stream namespace: `Streams:Topics:<t>:StreamNamespace`.** Set to e.g. `np`, the topic's
+  partition streams and topic-meta hash live under `np:re:` (`np:re:s:{topic}:<p>`, `np:re:m:{topic}`)
+  instead of the process's `<env>:re:`, so `dev` and `tst` can consume one feed published once by a
+  shared tier. Positions, reset markers, ownership/leases, outbox state, dedupe markers and projection
+  views stay in the process namespace, so each environment keeps its own cursor. A `WorkQueue` consumer
+  group on a stream in another namespace is named `<env>:re:<consumer>`, because the group lives on the
+  shared stream key; on an unshared stream the group name is unchanged. A process does not background-
+  trim a stream in another namespace. `StreamAdmin.ReadTopicLayoutAsync` gains an overload taking the
+  stream namespace, and the admin endpoints use the configured one. `KeyNamespace.StreamPrefix` returns
+  the prefix in force for a namespace. Unset, nothing changes: every key is where it was.
+
 ## 2026-10-27
 
 ### Fixed

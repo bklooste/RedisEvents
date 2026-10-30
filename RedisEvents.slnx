@@ -20,6 +20,7 @@
     <Project Path="tst/RedisEvents.MessagePack.UnitTests/RedisEvents.MessagePack.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.Restate.UnitTests/RedisEvents.Restate.UnitTests.csproj" />
     <Project Path="tst/RedisEvents.TestSupport/RedisEvents.TestSupport.csproj" />
+    <Project Path="tst/RedisEvents.NamespaceProbe/RedisEvents.NamespaceProbe.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/RedisEvents.EventSourcing.Sample.Inventory/RedisEvents.EventSourcing.Sample.Inventory.csproj" />

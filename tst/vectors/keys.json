@@ -26,6 +26,18 @@
       "key": "test:re:m:{orders}"
     },
     {
+      "name": "orders:stream:p0:colocated:ns-np",
+      "key": "np:re:s:{orders}:0"
+    },
+    {
+      "name": "orders:stream:p3:spread:ns-np",
+      "key": "np:re:s:orders:3"
+    },
+    {
+      "name": "orders:topic-meta:ns-np",
+      "key": "np:re:m:{orders}"
+    },
+    {
       "name": "orders:state",
       "key": "test:re:{orders}:state:es:Order:42"
     },
@@ -56,6 +68,18 @@
     {
       "name": "a.b-c:topic-meta",
       "key": "test:re:m:{a.b-c}"
+    },
+    {
+      "name": "a.b-c:stream:p0:colocated:ns-np",
+      "key": "np:re:s:{a.b-c}:0"
+    },
+    {
+      "name": "a.b-c:stream:p3:spread:ns-np",
+      "key": "np:re:s:a.b-c:3"
+    },
+    {
+      "name": "a.b-c:topic-meta:ns-np",
+      "key": "np:re:m:{a.b-c}"
     },
     {
       "name": "a.b-c:state",

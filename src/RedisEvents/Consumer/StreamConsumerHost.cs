@@ -1103,7 +1103,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         for (var i = 0; i < count; i++)
         {
             var partition = owned[i];
-            var key = StreamKeys.Stream(topic, partition, topicOptions.CoLocatePartitions);
+            var key = StreamKeys.Stream(topic, partition, topicOptions);
 
             var start = ResetMarkers.ApplyToStart(
                 StartPosition.Resolve(this.consumer, stored.TryGetValue(partition, out var id) ? id : null),
@@ -1292,7 +1292,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         for (var i = 0; i < count; i++)
         {
             var partition = owned[i];
-            var key = StreamKeys.Stream(topic, partition, topicOptions.CoLocatePartitions);
+            var key = StreamKeys.Stream(topic, partition, topicOptions);
 
             var start = ResetMarkers.ApplyToStart(
                 StartPosition.Resolve(this.consumer, stored.TryGetValue(partition, out var id) ? id : null),
@@ -1429,7 +1429,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
         CancellationToken startToken)
     {
         var topic = this.consumer.Topic;
-        var key = StreamKeys.Stream(topic, partition, topicOptions.CoLocatePartitions);
+        var key = StreamKeys.Stream(topic, partition, topicOptions);
 
         var start = ResetMarkers.ApplyToStart(
             StartPosition.Resolve(this.consumer, stored.TryGetValue(partition, out var id) ? id : null),
@@ -1459,7 +1459,7 @@ internal sealed class StreamConsumerHost : IHostedService, IAsyncDisposable
             var group = new WorkQueueFetch(
                 db,
                 key,
-                this.consumerName,
+                WorkQueueFetch.GroupName(this.consumerName, topicOptions),
                 this.InstanceName(),
                 start,
                 batchSize,

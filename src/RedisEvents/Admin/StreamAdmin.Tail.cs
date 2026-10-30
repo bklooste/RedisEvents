@@ -51,7 +51,7 @@ public static partial class StreamAdmin
         var reads = new Task<StreamId>[options.Partitions];
         for (var p = 0; p < reads.Length; p++)
         {
-            reads[p] = ReadTailAsync(db, StreamKeys.Stream(topic, p, options.CoLocatePartitions));
+            reads[p] = ReadTailAsync(db, StreamKeys.Stream(topic, p, options));
         }
 
         return await Task.WhenAll(reads).ConfigureAwait(false);

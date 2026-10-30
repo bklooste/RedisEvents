@@ -356,6 +356,15 @@ internal sealed class BackgroundTrimmer : IHostedService, IAsyncDisposable
                 "The background trimmer applies time-based retention only; length-based trimming rides on every XADD.");
         }
 
+        if (KeyNamespace.IsForeign(topicOptions))
+        {
+            // The clamp reads this process's p:{topic}:* only; the consumers that matter to a stream in
+            // another namespace keep their positions in theirs, invisible from here.
+            throw new StreamConfigurationException(
+                $"{StreamConfigBinder.SectionName}:Topics:{topic}:StreamNamespace is '{topicOptions.StreamNamespace}', so the topic's stream " +
+                "belongs to another namespace and is trimmed there. This process cannot see that namespace's consumer positions to clamp to.");
+        }
+
         return this.TrimAsync(topic, topicOptions, ct);
     }
 
@@ -376,7 +385,9 @@ internal sealed class BackgroundTrimmer : IHostedService, IAsyncDisposable
         var enabled = new List<string>();
         foreach (var (name, topic) in options.Topics)
         {
-            if (topic is not null && IsEnabled(topic))
+            // A stream in another namespace is trimmed by the namespace that owns it: this process's
+            // clamp could only see this namespace's positions. See TopicOptions.StreamNamespace.
+            if (topic is not null && IsEnabled(topic) && !KeyNamespace.IsForeign(topic))
             {
                 enabled.Add(name);
             }
@@ -485,7 +496,7 @@ internal sealed class BackgroundTrimmer : IHostedService, IAsyncDisposable
         StreamId cutoff,
         List<ConsumerPositions> positions)
     {
-        var key = StreamKeys.Stream(topic, partition, topicOptions.CoLocatePartitions);
+        var key = StreamKeys.Stream(topic, partition, topicOptions);
         var (clamp, holder) = Clamp(positions, partition);
 
         // The clamp only matters when it is *behind* what retention asked for. A healthy consumer
@@ -848,6 +859,19 @@ internal sealed class BackgroundTrimmer : IHostedService, IAsyncDisposable
     {
         foreach (var (name, topic) in this.options.Topics)
         {
+            if (topic is not null && topic.BackgroundTrimIntervalSeconds > 0 && KeyNamespace.IsForeign(topic))
+            {
+                this.log.LogInformation(
+                    "Streams: {Section}:Topics:{Topic}:BackgroundTrimIntervalSeconds is {IntervalSeconds} but the topic's stream is in " +
+                    "namespace '{StreamNamespace}', not this process's, so this process does not trim it. The namespace that owns the " +
+                    "stream trims it; the inline MAXLEN bounds it regardless.",
+                    StreamConfigBinder.SectionName,
+                    name,
+                    topic.BackgroundTrimIntervalSeconds,
+                    topic.StreamNamespace);
+                continue;
+            }
+
             if (topic is null || topic.BackgroundTrimIntervalSeconds <= 0 || IsEnabled(topic))
             {
                 continue;

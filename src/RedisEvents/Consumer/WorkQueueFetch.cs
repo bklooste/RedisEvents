@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using RedisEvents.Config;
 using RedisEvents.Errors;
 using RedisEvents.Positions;
 using RedisEvents.Wire;
@@ -171,6 +172,34 @@ internal sealed class WorkQueueFetch
 
     /// <summary>The pending queue, for the tests that assert on ack ordering directly.</summary>
     internal PendingAcks Pending => this.pending;
+
+    /// <summary>
+    /// The consumer-group name for <paramref name="consumer"/> on <paramref name="topic"/>'s stream.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bare consumer name when the stream is in this process's namespace — unchanged from before
+    /// <see cref="TopicOptions.StreamNamespace"/> existed, so existing groups keep their cursor.
+    /// </para>
+    /// <para>
+    /// When the stream lives in another namespace it is shared with other environments, and a group
+    /// lives <em>on</em> the stream key: <c>dev</c>'s and <c>tst</c>'s copies of one service would
+    /// otherwise join one group and split the stream between them, each environment silently missing
+    /// whatever the other was handed. So the group carries the process namespace
+    /// (<see cref="KeyNamespace.Prefix"/>), e.g. <c>dev:re:my-service</c> — the same prefix the
+    /// consumer's positions and leases already carry.
+    /// </para>
+    /// </remarks>
+    /// <param name="consumer">The effective consumer name.</param>
+    /// <param name="topic">The topic's options.</param>
+    /// <returns>The group name to <c>XGROUP CREATE</c> and <c>XREADGROUP</c> with.</returns>
+    internal static string GroupName(string consumer, TopicOptions topic)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(consumer);
+        ArgumentNullException.ThrowIfNull(topic);
+
+        return KeyNamespace.IsForeign(topic) ? KeyNamespace.Prefix() + consumer : consumer;
+    }
 
     /// <summary>
     /// The <see cref="PositionRecorder"/> to bind in group mode: positions are Redis's job here, so

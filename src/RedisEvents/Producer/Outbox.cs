@@ -187,7 +187,7 @@ public static class Outbox
         var effective = Validate(topic, topicOptions);
 
         var partition = Route(topic, partitionKey, options.Partition, effective.Partitions);
-        var streamKey = StreamKeys.Stream(topic, partition, effective.CoLocatePartitions);
+        var streamKey = StreamKeys.Stream(topic, partition, effective);
 
         RequireStateKeysInSlot(streamKey, topic, effective.CoLocatePartitions, stateKeys);
 
@@ -271,7 +271,7 @@ public static class Outbox
             var effective = Validate(publish.Topic, publish.TopicOptions);
             topicOptions[i] = effective;
             partitions[i] = Route(publish.Topic, publish.PartitionKey, publish.Options.Partition, effective.Partitions);
-            keys[i] = StreamKeys.Stream(publish.Topic, partitions[i], effective.CoLocatePartitions);
+            keys[i] = StreamKeys.Stream(publish.Topic, partitions[i], effective);
         }
 
         // One MULTI/EXEC covers one slot, so every stream key must share the first one's hash tag,
@@ -346,6 +346,8 @@ public static class Outbox
         ArgumentOutOfRangeException.ThrowIfNegative(partition);
         RequirePlainTopic(topic);
 
+        // Only the hash tag is compared, so the topic's stream namespace (outside the braces) does
+        // not matter here and the process namespace stands in for it.
         RequireStateKeysInSlot(
             StreamKeys.Stream(topic, partition, coLocatePartitions),
             topic,

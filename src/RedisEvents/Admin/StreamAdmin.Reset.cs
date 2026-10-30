@@ -423,7 +423,7 @@ public static partial class StreamAdmin
         {
             ct.ThrowIfCancellationRequested();
 
-            var key = StreamKeys.Stream(topic, partitions[i], coLocate);
+            var key = StreamKeys.Stream(topic, partitions[i], coLocate, options?.StreamNamespace);
             var bounds = await ReadBoundsAsync(db, key).ConfigureAwait(false);
 
             if (bounds.Newest is null && !await db.KeyExistsAsync(key).ConfigureAwait(false))
@@ -646,9 +646,29 @@ public static partial class StreamAdmin
     /// <param name="topic">Topic name.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Options carrying the recorded partition count (0 when unrecorded) and the probed layout.</returns>
+    public static Task<TopicOptions> ReadTopicLayoutAsync(
+        IConnectionMultiplexer redis,
+        string topic,
+        CancellationToken ct = default)
+        => ReadTopicLayoutAsync(redis, topic, streamNamespace: null, ct);
+
+    /// <summary>
+    /// Reads a topic's partition count and probes its key layout, for a topic whose stream lives in
+    /// <paramref name="streamNamespace"/> (<see cref="TopicOptions.StreamNamespace"/>).
+    /// </summary>
+    /// <remarks>
+    /// The returned options carry <paramref name="streamNamespace"/>, so passing them on to a reset or
+    /// a preview reads the right stream while the positions written stay in this process's namespace.
+    /// </remarks>
+    /// <param name="redis">The shared multiplexer.</param>
+    /// <param name="topic">Topic name.</param>
+    /// <param name="streamNamespace">The topic's stream namespace; <see langword="null"/> is this process's.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Options carrying the recorded partition count (0 when unrecorded), the probed layout and the stream namespace.</returns>
     public static async Task<TopicOptions> ReadTopicLayoutAsync(
         IConnectionMultiplexer redis,
         string topic,
+        string? streamNamespace,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(redis);
@@ -656,10 +676,10 @@ public static partial class StreamAdmin
         ct.ThrowIfCancellationRequested();
 
         var db = redis.GetDatabase();
-        var partitions = await ReadPartitionCountAsync(db, topic).ConfigureAwait(false);
-        var coLocate = await DetectCoLocationAsync(db, topic).ConfigureAwait(false);
+        var partitions = await ReadPartitionCountAsync(db, topic, streamNamespace).ConfigureAwait(false);
+        var coLocate = await DetectCoLocationAsync(db, topic, streamNamespace).ConfigureAwait(false);
 
-        return new TopicOptions { Partitions = partitions, CoLocatePartitions = coLocate };
+        return new TopicOptions { Partitions = partitions, CoLocatePartitions = coLocate, StreamNamespace = streamNamespace };
     }
 
     /// <summary>
@@ -667,16 +687,16 @@ public static partial class StreamAdmin
     /// configuration — what Redis actually holds.
     /// </summary>
     private static async Task<bool> ResolveCoLocateAsync(IDatabase db, string topic, TopicOptions? options)
-        => options?.CoLocatePartitions ?? await DetectCoLocationAsync(db, topic).ConfigureAwait(false);
+        => options?.CoLocatePartitions ?? await DetectCoLocationAsync(db, topic, streamNamespace: null).ConfigureAwait(false);
 
     /// <summary>
     /// Probes partition 0 under both key shapes. Co-located wins a tie (it is the library default and
     /// the shape a mixed leftover is most likely to be), and "neither" also returns the default.
     /// </summary>
-    private static async Task<bool> DetectCoLocationAsync(IDatabase db, string topic)
+    private static async Task<bool> DetectCoLocationAsync(IDatabase db, string topic, string? streamNamespace)
     {
-        var tagged = db.KeyExistsAsync(StreamKeys.Stream(topic, 0, coLocate: true));
-        var spread = db.KeyExistsAsync(StreamKeys.Stream(topic, 0, coLocate: false));
+        var tagged = db.KeyExistsAsync(StreamKeys.Stream(topic, 0, coLocate: true, streamNamespace));
+        var spread = db.KeyExistsAsync(StreamKeys.Stream(topic, 0, coLocate: false, streamNamespace));
 
         return await tagged.ConfigureAwait(false) || !await spread.ConfigureAwait(false);
     }
@@ -706,7 +726,7 @@ public static partial class StreamAdmin
             ct.ThrowIfCancellationRequested();
 
             var p = partitions[i];
-            var key = StreamKeys.Stream(topic, p, coLocate);
+            var key = StreamKeys.Stream(topic, p, coLocate, options?.StreamNamespace);
             var current = stored.TryGetValue(p, out var record) ? record.Id : (StreamId?)null;
 
             var length = await db.StreamLengthAsync(key).ConfigureAwait(false);
@@ -866,7 +886,7 @@ public static partial class StreamAdmin
             var known = options?.Partitions ?? 0;
             if (known < 1)
             {
-                known = await ReadPartitionCountAsync(db, topic).ConfigureAwait(false);
+                known = await ReadPartitionCountAsync(db, topic, options?.StreamNamespace).ConfigureAwait(false);
             }
 
             if (known >= 1 && one >= known)
@@ -884,7 +904,7 @@ public static partial class StreamAdmin
         var total = options?.Partitions ?? 0;
         if (total < 1)
         {
-            total = await ReadPartitionCountAsync(db, topic).ConfigureAwait(false);
+            total = await ReadPartitionCountAsync(db, topic, options?.StreamNamespace).ConfigureAwait(false);
         }
 
         if (total < 1)

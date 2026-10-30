@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    A one-consumer service, run as a child process by RedisEvents.Tests/StreamNamespaceTests. It
+    exists because the process key namespace comes from ASPNETCORE_ENVIRONMENT, which is process-wide:
+    two hosts in one test process cannot be "dev" and "tst" at once, and a per-topic stream namespace
+    is only proven by two processes that differ in exactly that.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+    <IsTestProject>false</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      The generic host from the shared framework, not the Microsoft.Extensions.Hosting package: the
+      probe runs from RedisEvents.Tests' output directory, which references the ASP.NET Core shared
+      framework (through RedisEvents.Web) and so carries no copy of the package assemblies. Taking the
+      framework here makes the probe's runtimeconfig ask for it too.
+    -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RedisEvents\RedisEvents.csproj" />
+  </ItemGroup>
+</Project>

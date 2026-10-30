@@ -114,7 +114,7 @@ public static partial class StreamAdmin
         ct.ThrowIfCancellationRequested();
 
         var db = redis.GetDatabase();
-        var metaKey = StreamKeys.TopicMeta(topic);
+        var metaKey = StreamKeys.TopicMeta(topic, options.StreamNamespace);
 
         // Seed with HSETNX so two processes starting together cannot half-overwrite each other, and
         // so a re-run never rewrites the creation breadcrumbs.
@@ -183,7 +183,7 @@ public static partial class StreamAdmin
         ct.ThrowIfCancellationRequested();
 
         var coLocate = options?.CoLocatePartitions ?? true;
-        var key = StreamKeys.Stream(topic, partition, coLocate);
+        var key = StreamKeys.Stream(topic, partition, coLocate, options?.StreamNamespace);
         var formatted = id.Format();
 
         var entries = await redis.GetDatabase()
@@ -270,7 +270,7 @@ public static partial class StreamAdmin
 
         for (var partition = 0; partition < options.Partitions; partition++)
         {
-            keys[partition] = StreamKeys.Stream(topic, partition, options.CoLocatePartitions);
+            keys[partition] = StreamKeys.Stream(topic, partition, options);
             probes[partition] = db.KeyExistsAsync(keys[partition]);
         }
 

@@ -156,6 +156,32 @@ public class TrimmerRegistrationTests
         trimmers[0].Topics.Should().BeEquivalentTo(["orders", "payments"]);
     }
 
+    /// <summary>
+    /// A topic whose stream lives in another namespace is not swept by this process: its clamp could
+    /// only see this namespace's positions, so it would trim under the consumers that actually read
+    /// the shared stream. The namespace that owns the stream trims it.
+    /// </summary>
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void A_topic_in_another_stream_namespace_is_not_swept()
+    {
+        var builder = Builder("""
+        {
+          "Streams": {
+            "Consumers": [ { "Topic": "orders" }, { "Topic": "feed" } ],
+            "Topics": {
+              "orders": { "Partitions": 1, "MaxLen": 100000, "RetentionSeconds": 3600, "BackgroundTrimIntervalSeconds": 30 },
+              "feed": { "Partitions": 1, "MaxLen": 100000, "RetentionSeconds": 3600, "BackgroundTrimIntervalSeconds": 30, "StreamNamespace": "elsewhere" }
+            }
+          }
+        }
+        """);
+        builder.AddStream<TrimHandler>("orders");
+        builder.AddStream<OtherTrimHandler>("feed");
+
+        TrimmerOf(builder)!.Topics.Should().ContainSingle().Which.Should().Be("orders");
+    }
+
     private static HostApplicationBuilder Builder(string json)
     {
         var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings

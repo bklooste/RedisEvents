@@ -85,6 +85,57 @@ public sealed record TopicOptions
     public bool CoLocatePartitions { get; set; } = true;
 
     /// <summary>
+    /// The key namespace this topic's <em>stream</em> lives in, when it is not this process's own
+    /// (default: <see langword="null"/>, the process namespace).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Set to e.g. <c>"np"</c>, the topic's partition streams and topic-meta hash are read and written
+    /// under <c>np:re:</c> — <c>np:re:s:{topic}:&lt;p&gt;</c> and <c>np:re:m:{topic}</c> — instead of
+    /// under <see cref="KeyNamespace.Prefix"/>. This is how several environments (<c>dev</c>,
+    /// <c>tst</c>, …) consume one feed that a shared tier publishes once.
+    /// </para>
+    /// <para>
+    /// Only the stream moves. Everything that belongs to the <em>consumer</em> stays in the process
+    /// namespace, so two environments reading one shared stream never share a cursor:
+    /// <list type="bullet">
+    ///   <item><description>positions and position meta (<c>p:</c>), including reset markers;</description></item>
+    ///   <item><description>ownership and leases (<c>o:</c>);</description></item>
+    ///   <item><description>
+    ///     the <see cref="DeliveryMode.WorkQueue"/> consumer-group name. The group lives <em>on</em> the
+    ///     shared stream key, so on a stream in another namespace it is the consumer name prefixed with
+    ///     the process namespace (<c>dev:re:my-service</c>), not the bare consumer name;
+    ///   </description></item>
+    ///   <item><description>
+    ///     outbox state keys, idempotency markers and <c>RedisEvents.Projections</c> view keys.
+    ///   </description></item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// A process does not trim a stream in another namespace: <see cref="BackgroundTrimIntervalSeconds"/>
+    /// is ignored for it (and logged), because its clamp could only see this namespace's consumers. The
+    /// namespace that owns the stream trims it; the inline <c>MAXLEN</c> on every <c>XADD</c> bounds it
+    /// regardless. Positions of consumers in other namespaces never hold a shared stream back.
+    /// </para>
+    /// <para>
+    /// The value is lowercased, like the environment name, and may contain only letters, digits,
+    /// <c>-</c> and <c>_</c>. Setting it to this process's own environment name changes nothing.
+    /// </para>
+    /// <para>
+    /// <b>Changing it on a running consumer.</b> The topic moves to different stream keys, but the
+    /// consumer's positions do not move: they are keyed by topic and consumer, not by stream
+    /// namespace. Ids stored against the old stream are then applied to the new one, and any entry
+    /// on the new stream older than them is skipped. Reset the consumer when it switches — an
+    /// admin reset to the start, or <see cref="ConsumerOptions.ResetOnStart"/> with a
+    /// <see cref="ConsumerOptions.StartFromDate"/> for one deploy — or delete its
+    /// <c>p:{topic}:&lt;consumer&gt;</c> hash so it starts from
+    /// <see cref="ConsumerOptions.StartFromWhenMissing"/>. A <see cref="DeliveryMode.WorkQueue"/>
+    /// consumer needs none of this: its group is created afresh on the new stream.
+    /// </para>
+    /// </remarks>
+    public string? StreamNamespace { get; set; }
+
+    /// <summary>
     /// Whether state-stream entries written by a state store on this topic also keep the event's
     /// correlation id, <c>traceparent</c> and headers (default: <see langword="false"/>).
     /// </summary>

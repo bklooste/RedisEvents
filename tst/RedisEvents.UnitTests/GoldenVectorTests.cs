@@ -230,6 +230,9 @@ public sealed class GoldenVectorTests
                 keys.Add(new KeyCase($"{topic}:positions-meta", StreamKeys.PositionsMeta(topic, Consumer)));
                 keys.Add(new KeyCase($"{topic}:ownership", StreamKeys.Ownership(topic, Consumer)));
                 keys.Add(new KeyCase($"{topic}:topic-meta", StreamKeys.TopicMeta(topic)));
+                keys.Add(new KeyCase($"{topic}:stream:p0:colocated:ns-np", StreamKeys.Stream(topic, 0, coLocate: true, streamNamespace: "np")));
+                keys.Add(new KeyCase($"{topic}:stream:p3:spread:ns-np", StreamKeys.Stream(topic, 3, coLocate: false, streamNamespace: "np")));
+                keys.Add(new KeyCase($"{topic}:topic-meta:ns-np", StreamKeys.TopicMeta(topic, streamNamespace: "np")));
                 keys.Add(new KeyCase($"{topic}:state", Outbox.StateKey(topic, "es:Order:42")));
                 keys.Add(new KeyCase($"{topic}:dedupe", Idempotency.Key(topic, "evt-1")));
             }
