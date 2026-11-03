@@ -254,6 +254,42 @@ allocation-free — routing a message costs a couple of nanoseconds and no garba
 production throughput the codec, not the library's own bookkeeping, is what shows up in a
 profiler.
 
+### RedisEvents vs ZeroMQ
+
+ZeroMQ (`zmq`/`czmq`) is the fastest practical choice for raw message passing: no broker process
+at all, nanosecond-scale buffer hand-off over TCP/IPC/inproc, and well over 100,000 msg/s on a
+single unpipelined socket. That's a different question from the one this library answers —
+"Kafka-shaped guarantees, running nothing but Redis" — so the comparison below is honest about
+where each one wins.
+
+| Metric | ZeroMQ (zmq/czmq) | RedisEvents (this library) |
+| --- | --- | --- |
+| Pipelined / batched throughput | ~500,000+ msg/s | ~137,000 – 225,000 msg/s pipelined; ~389,000 – 422,000 msg/s via the buffered publisher |
+| Unpipelined (direct) throughput | ~100,000+ msg/s (raw TCP/IPC) | ~6,200 – 6,300 msg/s (bound by the Redis round trip) |
+| End-to-end consume | ~500,000+ msg/s | ~255,000 – 502,000 msg/s |
+| Low-level micro-latency | nanosecond scale (raw buffer pass) | ~41 – 125 ns (command encoding) |
+| Bottleneck | application-level processing logic | StackExchange.Redis's round trip, not the library's own code |
+| Durable consumer positions | none — build your own | built in, per partition (`XRANGE` replay from any point) |
+| Per-key ordering | none — a socket pattern, not a guarantee | guaranteed within a partition |
+| At-least-once delivery | none — frame and ack it yourself | built in, with an explicit error contract |
+| Broker process to run | none, but no persistence either | none beyond the Redis you likely already run |
+| Cross-language wire format | design and maintain it yourself | wire-compatible with [RedisEvents-rs](https://github.com/bklooste/RedisEvents-rs), checked in CI |
+
+Only the unpipelined row is a fair "library vs library" comparison, and ZeroMQ wins it by more
+than an order of magnitude, because a single `XADD` pays the full Redis round trip that a raw
+socket write skips entirely. Pipeline or buffer — the normal way to run a producer — and the gap
+mostly closes; the [Rust port](https://github.com/bklooste/RedisEvents-rs#performance) of this
+same library, benchmarked the same way on the same hardware, lands in the same
+few-hundred-thousand-msg/s band ZeroMQ advertises for pipelined throughput.
+
+If you want the fastest possible point-to-point messaging, use ZeroMQ — that's what it's for, and
+nothing built on a Redis round trip is going to beat a raw socket. What you give up for that speed
+is everything the table's bottom half doesn't show: durability, ordering, replay and at-least-once
+delivery aren't ZeroMQ features, they're work taken on per socket pattern (PUB/SUB drops messages
+under a slow subscriber; nothing survives a restart without a store bolted on yourself). This
+library trades a small amount of raw throughput for a lot of built-in correctness — and once you
+pipeline or buffer, which is how real producers run, even that trade mostly disappears.
+
 ## Security
 
 This library doesn't invent its own auth, encryption, or access-control layer — it hands your
