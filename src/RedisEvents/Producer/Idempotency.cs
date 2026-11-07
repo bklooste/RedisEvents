@@ -53,7 +53,9 @@ public static class Idempotency
                 "Rename the scope.");
         }
 
-        return $"{KeyNamespace.Prefix()}dedupe:{{{scope}}}:{id}";
+        return KeyNamespace.HashTagTopics()
+            ? $"{KeyNamespace.Prefix()}dedupe:{{{scope}}}:{id}"
+            : $"{KeyNamespace.Prefix()}dedupe:{scope}:{id}";
     }
 
     /// <summary>
