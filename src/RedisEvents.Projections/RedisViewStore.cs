@@ -104,7 +104,9 @@ public sealed class RedisViewStore<TView> : IViewStore<TView>
         ArgumentException.ThrowIfNullOrWhiteSpace(owner);
 
         this.db = db;
-        this.key = $"{KeyNamespace.Prefix()}{{{topic}}}:view:{owner}:{viewName}";
+        this.key = KeyNamespace.HashTagTopics()
+            ? $"{KeyNamespace.Prefix()}{{{topic}}}:view:{owner}:{viewName}"
+            : $"{KeyNamespace.Prefix()}{topic}:view:{owner}:{viewName}";
         this.typeInfo = typeInfo;
     }
 

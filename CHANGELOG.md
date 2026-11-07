@@ -4,6 +4,19 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-11-08
+
+### Added
+
+- **`STREAMS_HASH_TAG=false` drops the cluster hash tag.** The `{topic}` brace is a Redis Cluster hash
+  tag that pins one topic's keys to one slot. On a single instance there are no slots, so the brace only
+  breaks the key tree in tools that split on `:`. Set `STREAMS_HASH_TAG=false` (also `0`/`no`/`off`;
+  default is on) and no key family carries a brace — stream, positions, ownership, meta, dedupe,
+  event-store state and projection views — so `re:s:{dev:bet:core-es}:0` reads as `re:s:dev:bet:core-es:0`.
+  The cluster slot guards (outbox same-slot, `RequireCoLocatedPartitions`) are skipped, since one node has
+  one slot. Leave it on for a real cluster, where a transaction or grouped read would otherwise fail with
+  `CROSSSLOT`. Topic and consumer names stay opaque; the library still knows nothing of environments.
+
 ## 2026-10-30
 
 ### Changed (breaking: every key moves)

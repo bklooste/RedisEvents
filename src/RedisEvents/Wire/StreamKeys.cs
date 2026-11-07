@@ -90,10 +90,12 @@ internal static class StreamKeys
         bool hasTail)
     {
         // namespace + prefix + ':' + ('{' topic '}' | topic) + (':' tail)? + suffix?
+        // The brace is a Redis Cluster hash tag; STREAMS_HASH_TAG=false (single-instance) drops it.
         var ns = KeyNamespace.Prefix();
+        bool tag = coLocate && KeyNamespace.HashTagTopics();
 
         int length = ns.Length + 2 + topic.Length
-            + (coLocate ? 2 : 0)
+            + (tag ? 2 : 0)
             + (hasTail ? 1 + tail.Length : 0)
             + (suffix?.Length ?? 0);
 
@@ -105,14 +107,14 @@ internal static class StreamKeys
         at += ns.Length;
         buffer[at++] = prefix;
         buffer[at++] = ':';
-        if (coLocate)
+        if (tag)
         {
             buffer[at++] = '{';
         }
 
         topic.CopyTo(buffer[at..]);
         at += topic.Length;
-        if (coLocate)
+        if (tag)
         {
             buffer[at++] = '}';
         }

@@ -124,6 +124,13 @@ internal sealed class StreamStore : IStreamStore
             return;
         }
 
+        // On a single instance (STREAMS_HASH_TAG=false) there are no slots to spread across, so a
+        // state store and its partition streams always share the one node — the refusal is moot.
+        if (!Config.KeyNamespace.HashTagTopics())
+        {
+            return;
+        }
+
         throw new StreamConfigurationException(
             $"Streams:Topics:{topic}:CoLocatePartitions is false, so the topic's partition streams are spread across Redis Cluster " +
             $"slots and no state key can share one with them — but a state store's whole guarantee is that the append to " +

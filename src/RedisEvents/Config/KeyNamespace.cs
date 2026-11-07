@@ -27,6 +27,40 @@ public static class KeyNamespace
 {
     private const string OverrideVariable = "STREAMS_KEY_PREFIX";
     private const string DefaultPrefix = "re:";
+    private const string HashTagVariable = "STREAMS_HASH_TAG";
+
+    /// <summary>
+    /// Whether keys carry a Redis Cluster hash tag — the <c>{topic}</c> brace that forces one topic's
+    /// keys onto one slot. On by default, because the library's co-location guarantees (an outbox
+    /// transaction over a stream and its state key, a worker's multi-stream <c>XREAD</c>) hold only
+    /// when the keys share a slot.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>STREAMS_HASH_TAG=false</c> (also <c>0</c> / <c>no</c> / <c>off</c>) drops the brace from
+    /// every key the library and its siblings write, so keys read as a plain <c>:</c>-delimited
+    /// hierarchy. It is for a <b>single-instance</b> deployment, where there are no slots: one
+    /// <c>MULTI/EXEC</c> spans everything, a multi-stream <c>XREAD</c> is one node's work regardless,
+    /// and the cluster slot guards (<c>Outbox.EnsureSameSlot</c>, <c>StreamStore.RequireCoLocatedPartitions</c>)
+    /// have nothing to check, so they are skipped. Turning it off on a real cluster would let a
+    /// transaction or a grouped read fail at runtime with <c>CROSSSLOT</c>; leave it on there.
+    /// </para>
+    /// </remarks>
+    /// <returns><see langword="true"/> unless <c>STREAMS_HASH_TAG</c> is set to a falsey value.</returns>
+    public static bool HashTagTopics()
+    {
+        var set = Environment.GetEnvironmentVariable(HashTagVariable);
+        if (string.IsNullOrWhiteSpace(set))
+        {
+            return true;
+        }
+
+        return set.Trim() switch
+        {
+            "false" or "False" or "FALSE" or "0" or "no" or "No" or "NO" or "off" or "Off" or "OFF" => false,
+            _ => true,
+        };
+    }
 
     /// <summary>
     /// The prefix to fold into every key: <c>"re:"</c>, or <c>STREAMS_KEY_PREFIX</c> verbatim when set.

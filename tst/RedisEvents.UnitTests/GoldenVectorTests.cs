@@ -259,6 +259,57 @@ public sealed class GoldenVectorTests
         }
     }
 
+    [Fact]
+    [Trait("TestType", "UnitTest")]
+    public void Hash_tag_off_drops_the_brace_from_every_key_family()
+    {
+        const string Topic = "dev:bet:core-es";
+        const string Consumer = "dev:bet:core-projection";
+        var vars = new[] { "STREAMS_KEY_PREFIX", "STREAMS_HASH_TAG" };
+        var saved = vars.ToDictionary(v => v, Environment.GetEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable("STREAMS_KEY_PREFIX", null);
+
+            // Default (tag on): a single colon-crossing hash tag, as a cluster needs.
+            Environment.SetEnvironmentVariable("STREAMS_HASH_TAG", null);
+            ((string)StreamKeys.Stream(Topic, 0)).Should().Be("re:s:{dev:bet:core-es}:0");
+            Outbox.StateKey(Topic, "es:Bet:42").ToString().Should().Be("re:{dev:bet:core-es}:state:es:Bet:42");
+
+            // Tag off (single instance): no brace anywhere, keys read as a clean ':' hierarchy.
+            Environment.SetEnvironmentVariable("STREAMS_HASH_TAG", "false");
+            var keys = new[]
+            {
+                (string)StreamKeys.Stream(Topic, 0),
+                (string)StreamKeys.Stream(Topic, 3, coLocate: false),
+                (string)StreamKeys.Positions(Topic, Consumer),
+                (string)StreamKeys.PositionsMeta(Topic, Consumer),
+                (string)StreamKeys.Ownership(Topic, Consumer),
+                (string)StreamKeys.TopicMeta(Topic),
+                Outbox.StateKey(Topic, "es:Bet:42").ToString(),
+                Idempotency.Key(Topic, "evt-1").ToString(),
+            };
+
+            keys.Should().Equal(
+                "re:s:dev:bet:core-es:0",
+                "re:s:dev:bet:core-es:3",
+                "re:p:dev:bet:core-es:dev:bet:core-projection",
+                "re:p:dev:bet:core-es:dev:bet:core-projection:meta",
+                "re:o:dev:bet:core-es:dev:bet:core-projection",
+                "re:m:dev:bet:core-es",
+                "re:dev:bet:core-es:state:es:Bet:42",
+                "re:dedupe:dev:bet:core-es:evt-1");
+            keys.Should().OnlyContain(k => !k.Contains('{') && !k.Contains('}'));
+        }
+        finally
+        {
+            foreach (var pair in saved)
+            {
+                Environment.SetEnvironmentVariable(pair.Key, pair.Value);
+            }
+        }
+    }
+
     private static PrefixCase PrefixFor(string name, string? aspnet, string? dotnet, string? streams)
     {
         var saved = PrefixVariables.ToDictionary(v => v, Environment.GetEnvironmentVariable);

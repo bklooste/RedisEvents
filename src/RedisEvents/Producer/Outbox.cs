@@ -311,7 +311,9 @@ public static class Outbox
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         RequirePlainTopic(topic);
 
-        return $"{Config.KeyNamespace.Prefix()}{{{topic}}}:state:{name}";
+        return Config.KeyNamespace.HashTagTopics()
+            ? $"{Config.KeyNamespace.Prefix()}{{{topic}}}:state:{name}"
+            : $"{Config.KeyNamespace.Prefix()}{topic}:state:{name}";
     }
 
     /// <summary>
@@ -598,6 +600,13 @@ public static class Outbox
     /// <summary>Requires every publish in one transaction to hash to the first one's slot.</summary>
     private static void RequireStreamKeysInOneSlot(RedisKey[] keys, ReadOnlySpan<OutboxPublish> publishes)
     {
+        // No hash tags means a single instance with one slot — nothing can CROSSSLOT, so there is
+        // nothing to check and the untagged keys would compare whole-key-unequal and wrongly fail.
+        if (!Config.KeyNamespace.HashTagTopics())
+        {
+            return;
+        }
+
         var reference = Text(keys[0]);
         var tag = HashTag(reference);
 
@@ -648,6 +657,13 @@ public static class Outbox
         // relying on the per-call default is call EnsureSameSlot once at startup with its key shapes,
         // which fails the pod rather than the publish.
         if (stateKeys is null || stateKeys.Count == 0)
+        {
+            return;
+        }
+
+        // A single instance (STREAMS_HASH_TAG=false) has one slot: a state key and the stream are
+        // always in the same MULTI/EXEC, and the untagged keys carry no tag to compare.
+        if (!Config.KeyNamespace.HashTagTopics())
         {
             return;
         }
