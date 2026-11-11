@@ -4,6 +4,14 @@ Every push to `main` publishes a new patch version automatically (see `version.j
 not manually tagged), so not every version number gets its own entry here. This file tracks what
 actually changed.
 
+## 2026-11-11
+
+### Added
+
+- **`net11.0` target.** Every project (library, tests, samples) now multi-targets `net10.0;net11.0`, so
+  .NET 11 GA (SDK 11.0.100) consumers get a native `net11.0` asset. `global.json` pins SDK 11.0.100
+  (`rollForward: latestFeature`); CI drops `dotnet-quality: preview`. No API or behaviour change.
+
 ## 2026-11-08
 
 ### Added
