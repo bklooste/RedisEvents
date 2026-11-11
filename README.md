@@ -63,7 +63,7 @@ original `RedisEvents` / `RedisEvents.Web` namespaces.
   inspection for runbooks; `RedisEvents.Web` adds ASP.NET Core health checks and optional
   minimal-API admin endpoints for the same operations, kept in a separate package so a headless worker
   never needs to reference ASP.NET Core.
-- **AOT-friendly and dependency-light.** The core library (`RedisEvents`) targets `net10.0`,
+- **AOT-friendly and dependency-light.** The core library (`RedisEvents`) targets `net10.0` and `net11.0`,
   is `IsAotCompatible`, and depends on nothing beyond `StackExchange.Redis`, `OpenTelemetry.Api`, and
   the `Microsoft.Extensions.*` abstractions — no ASP.NET Core reference required to run a consumer.
 - **OpenTelemetry metrics out of the box** — `streams.errors`, `streams.blocked`,
